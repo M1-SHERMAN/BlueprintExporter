@@ -1,0 +1,156 @@
+ BlueprintExporter 第四次迭代实施计划
+
+ Context
+
+ 第三次迭代完成后，验证发现未连接非 exec 输出 Pin 的过滤仍有遗漏（63 个残留），根因是 GetMeaningfulPins 对基础类型
+ trivial 默认值（"false"/"0"/"0, 0, 0"
+ 等）判断有误。同时，新增需求要求支持在蓝图编辑器中选中节点后直接导出局部逻辑，解决整图导出内容过多的痛点。
+
+ ---
+ P0：Bug 修复（1 行修改）
+
+ 文件：Private/BlueprintTextFormatter.cpp，第 479 行
+
+ 修改：在 GetMeaningfulPins 中，将过滤条件的末行：
+ && Pin.DefaultValue.IsEmpty())
+ 改为：
+ && (Pin.DefaultValue.IsEmpty() || IsTrivialDefault(Pin.DefaultValue)))
+
+ IsTrivialDefault 已实现（第 490–504 行），覆盖 "0", "false", "0.0", "0.000000", "0, 0, 0", "None", "()", "(())",
+ "(X=0.000000,Y=0.000000,Z=0.000000)"。
+
+ ---
+ P1：新功能 — 导出选中节点
+
+ 步骤 1 — BlueprintGraphExtractor.h：新增 public 方法声明
+
+ // 在 public: 块，Extract() 之后
+ FExportedGraph ExtractSelectedNodes(
+     const TSet<UEdGraphNode*>& SelectedNodes,
+     const UEdGraph* OwningGraph);
+
+ 步骤 2 — BlueprintGraphExtractor.cpp：实现 ExtractSelectedNodes
+
+ 在文件末尾新增：遍历 SelectedNodes，跳过 UEdGraphNode_Comment，对每个节点调用已有的 private ExtractNode(Node,
+ GraphName)，结果写入 FExportedGraph（GraphName = OwningGraph->GetName()，GraphType = "Selection"）。
+
+ 步骤 3 — BlueprintTextFormatter.h：新增成员变量和方法
+
+ // 在 public: 块
+ FString FormatSelectedNodes(const FExportedGraph& Graph, const FString& BlueprintName);
+
+ // 在 private: 块（新增）
+ TSet<FString> SelectionContext; // 空=全量，非空=选区模式
+
+ 步骤 4 — BlueprintTextFormatter.cpp：三处修改 + 新增方法
+
+ 4a. FormatPin（第 249–258 行） — 连接字符串构建时，若 SelectionContext 非空且目标不在其中，追加  (external)：
+ if (!SelectionContext.IsEmpty() && !SelectionContext.Contains(Link.Key))
+     TargetStr += TEXT(" (external)");
+
+ 4b. FormatExecutionFlow（第 575 行 ResolveRerouteChain 之后） — 选区模式下跳过外部节点：
+ if (!SelectionContext.IsEmpty() && !SelectionContext.Contains(FinalTarget))
+     continue;
+
+ 4c. FormatDataFlow（第 620 行 ResolveRerouteChain 之后） — 同上：
+ if (!SelectionContext.IsEmpty() && !SelectionContext.Contains(FinalNode))
+     continue;
+
+ 4d. 新增 FormatSelectedNodes（文件末尾） — 实现逻辑：
+ 1. 用 Graph.Nodes 填充 SelectionContext
+ 2. 输出 header：=== Selected Nodes from: {BlueprintName} / {GraphName} ({N} nodes) ===
+ 3. 不输出变量区
+ 4. 直接调用 TopologicalSort、FormatNode、FormatExecutionFlow、FormatDataFlow（与 FormatGraph 内部逻辑相同，但自定义
+ header，不调用 FormatGraph）
+ 5. 最后 SelectionContext.Empty()
+
+ 步骤 5 — BlueprintExporterModule.h：新增两个 private 方法声明
+
+ void CopySelectedNodesToClipboard(const UEdGraph* Graph);
+ void ExportSelectedNodesToFile(const UEdGraph* Graph);
+
+ 步骤 6 — BlueprintExporterModule.cpp：新增 include + 菜单注册 + 方法实现
+
+ 6a. 新增 include（在已有 include 之后）：
+ #include "BlueprintEditor.h"                  // FBlueprintEditor, GetSelectedNodes()
+ #include "Kismet2/BlueprintEditorUtils.h"      // FindBlueprintForGraph
+ #include "Subsystems/AssetEditorSubsystem.h"   // UAssetEditorSubsystem
+ #include "HAL/PlatformApplicationMisc.h"       // ClipboardCopy
+ （UGraphNodeContextMenuContext 定义在 Runtime/Engine 的 EdGraph/EdGraphNode.h，已通过 Engine 模块引入，无需额外
+ include）
+
+ 6b. RegisterMenus 末尾新增 — 扩展 "GraphEditor.GraphContextMenu.EdGraphSchema_K2"：
+
+ 使用 AddDynamicSection + FNewToolMenuDelegate，在 lambda 内：
+ 1. 从 InMenu->FindContext<UGraphNodeContextMenuContext>() 取 Graph
+ 2. FBlueprintEditorUtils::FindBlueprintForGraph(Graph) 取 Blueprint
+ 3. GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->FindEditorForAsset(BP, false) 取编辑器实例
+ 4. 检查 EditorInstance->GetEditorName() == FName("BlueprintEditor")，通过后 static_cast<FBlueprintEditor*> 并调用
+ GetSelectedNodes()
+ 5. 根据 SelectedCount > 0 设置 bHasSelection
+ 6. 用 FUIAction(FExecuteAction, FCanExecuteAction::CreateLambda([bHasSelection]{return bHasSelection;}))
+ 添加两个菜单项：
+   - "Copy Selected Nodes as Text" → CopySelectedNodesToClipboard(Graph)
+   - "Export Selected Nodes to File..." → ExportSelectedNodesToFile(Graph)
+   - Tooltip 根据 bHasSelection 动态切换（"No nodes selected" vs 正常描述）
+
+ 6c. 实现两个方法 — 共用内部逻辑（可提取 private lambda）：
+ 1. FindBlueprintForGraph → 找 Blueprint
+ 2. AssetEditorSubsystem->FindEditorForAsset → 验证 EditorName → GetSelectedNodes()
+ 3. Cast 每个 UObject* 为 UEdGraphNode* 收集成 TSet<UEdGraphNode*>
+ 4. FBlueprintGraphExtractor::ExtractSelectedNodes(Nodes, Graph)
+ 5. FBlueprintTextFormatter::FormatSelectedNodes(ExportedGraph, Blueprint->GetName())
+ 6. CopySelectedNodesToClipboard：FPlatformApplicationMisc::ClipboardCopy(*OutputText)
+ 7. ExportSelectedNodesToFile：复用现有 SaveFileDialog 逻辑，默认文件名 {BPName}_selection.txt
+
+ 步骤 7 — BlueprintExporter.Build.cs：新增 ApplicationCore 依赖
+
+ 在 PrivateDependencyModuleNames 数组中添加 "ApplicationCore"（提供 FPlatformApplicationMisc）。
+
+ ---
+ 关键注意事项
+
+ - 菜单注册时序：ExtendMenu("GraphEditor.GraphContextMenu.EdGraphSchema_K2") 在目标菜单尚未注册时，UToolMenus
+ 会预创建占位，等实际注册时自动合并，无需担心时序。
+ - 类型转换安全：转型 FBlueprintEditor* 前必须用 GetEditorName() 守卫，防止非蓝图编辑器崩溃。
+ - FormatSelectedNodes 不调用 FormatGraph：避免输出 --- Graph: xxx --- header，直接调用内部方法。
+ - SelectionContext 清理：FormatSelectedNodes 末尾必须 SelectionContext.Empty()，防止污染后续的 Format() 调用。
+
+ ---
+ 关键文件路径
+
+ ┌─────────────────────────────────────┬───────────────────────────────────────────────────────┐
+ │                文件                 │                       修改类型                        │
+ ├─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+ │ Private/BlueprintTextFormatter.cpp  │ P0 修复（1行）+ P1 新增方法 + 3 处守卫逻辑            │
+ ├─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+ │ Public/BlueprintTextFormatter.h     │ 新增 SelectionContext 成员 + FormatSelectedNodes 声明 │
+ ├─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+ │ Private/BlueprintGraphExtractor.cpp │ 新增 ExtractSelectedNodes 实现                        │
+ ├─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+ │ Public/BlueprintGraphExtractor.h    │ 新增 ExtractSelectedNodes public 声明                 │
+ ├─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+ │ Private/BlueprintExporterModule.cpp │ 新增 include + 菜单注册扩展 + 两个方法实现            │
+ ├─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+ │ Public/BlueprintExporterModule.h    │ 新增两个 private 方法声明                             │
+ ├─────────────────────────────────────┼───────────────────────────────────────────────────────┤
+ │ BlueprintExporter.Build.cs          │ 新增 ApplicationCore 依赖                             │
+ └─────────────────────────────────────┴───────────────────────────────────────────────────────┘
+
+ ---
+ 验证方案
+
+ P0 验证
+
+ 1. 对 AC_EnemyAI 运行完整导出（v5.0）
+ 2. 检查 BreakHitResult 节点：仅保留有连接的 → Location (Vector) -> ...，其余 14 个字段不显示
+ 3. 检查 BreakVector 节点：仅保留 → Z (double) -> ...，X/Y 不显示
+ 4. 确认有连接的输出 Pin 未受影响
+
+ P1 验证
+
+ 1. 打开 AC_EnemyAI / EventGraph，框选 BeginPlay 链前 5-6 个节点
+ 2. 右键 → "Copy Selected Nodes as Text" → 检查剪贴板：header 正确，外部连接有 (external) 标记
+ 3. 右键 → "Export Selected Nodes to File..." → 确认弹出对话框、文件内容正确
+ 4. 确认 Execution/Data Flow 仅含选区内连接
+ 5. 不选中任何节点时，两菜单项灰显，Tooltip 为 "No nodes selected"

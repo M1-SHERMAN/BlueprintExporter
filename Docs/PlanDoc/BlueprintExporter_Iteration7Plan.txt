@@ -1,0 +1,402 @@
+BlueprintExporter 第七次迭代实施计划
+
+Context
+
+第六次迭代完成了自动导出机制（保存时增量导出、关闭时全量刷新、类型过滤、分层目录结构）。
+测试通过后发现一个体验问题：编辑器关闭时的全量导出（ExportAllBlueprints）会无条件地对所有
+蓝图执行 加载→Extract→Format→写文件，即使内容完全没有变化（例如用户刚执行过手动全量导出），
+仍然会造成数秒到数十秒的卡顿，用户可能误以为编辑器死机。
+
+本次迭代目标：为 ExportAllBlueprints 增加双层增量检测机制，只对真正发生变更的蓝图执行导出。
+
+---
+修改范围
+
+┌───────────────────────────────────────┬──────┐
+│                 文件                  │ 操作 │
+├───────────────────────────────────────┼──────┤
+│ Private/BlueprintExporterModule.cpp   │ 修改 │
+├───────────────────────────────────────┼──────┤
+│ Public/BlueprintExporterModule.h      │ 修改 │
+└───────────────────────────────────────┴──────┘
+
+仅涉及 ExportAllBlueprints 和 ExportBlueprintToCache 两个方法的改造，
+不新增文件，不修改 Settings、Formatter、Extractor 等其他模块。
+
+---
+增量检测策略
+
+采用方案 B + A 双层检测：
+
+┌──────────┬──────────────────────────────┬──────────────────────────────────────┐
+│   层级   │            检测方式          │               作用                   │
+├──────────┼──────────────────────────────┼──────────────────────────────────────┤
+│ 第一层   │ .uasset 时间戳 vs 导出文件   │ 跳过未修改的蓝图，避免加载资产       │
+│ (方案 B) │ _summary.txt 时间戳比对      │ （最大性能收益，省去 GetAsset 开销） │
+├──────────┼──────────────────────────────┼──────────────────────────────────────┤
+│ 第二层   │ 生成内容字符串比对磁盘已有   │ 避免无意义的磁盘写入                 │
+│ (方案 A) │ 文件内容                     │ （防止时间戳漂移导致误判重导出）     │
+└──────────┴──────────────────────────────┴──────────────────────────────────────┘
+
+决策流程：
+
+  AssetRegistry 枚举蓝图
+      │
+      ▼
+  获取 .uasset 文件修改时间
+      │
+      ▼
+  导出目录中 _summary.txt 存在？──否──→ 需要导出（新蓝图）
+      │
+      是
+      │
+      ▼
+  _summary.txt 时间 >= .uasset 时间？──否──→ 需要导出（蓝图有更新）
+      │
+      是
+      │
+      ▼
+  跳过（标记为 unchanged）
+
+  需要导出时：
+      │
+      ▼
+  GetAsset() 加载蓝图 → Extract → Format
+      │
+      ▼
+  每个 Graph 文件：新内容 == 磁盘内容？──是──→ 跳过写入
+      │
+      否
+      │
+      ▼
+  写入文件
+
+---
+实施步骤
+
+Step 1: Public/BlueprintExporterModule.h
+
+在 private: 区块的 Iteration 6 声明附近，修改 ExportBlueprintToCache 签名，
+新增返回是否实际写入了文件的信息（用于日志统计）：
+
+  // 将原有声明：
+  bool ExportBlueprintToCache(UBlueprint* Blueprint);
+
+  // 改为：
+  /** 导出蓝图到缓存目录。
+   *  @return true 如果实际写入了至少一个文件（内容有变更）；false 如果内容完全相同无需写入 */
+  bool ExportBlueprintToCache(UBlueprint* Blueprint);
+
+  // 新增私有辅助方法：
+  /** 比对内容并写入文件，内容相同则跳过。返回 true 表示实际写入了文件。 */
+  static bool WriteFileIfChanged(const FString& FilePath, const FString& Content);
+
+  /** 获取蓝图 .uasset 文件的磁盘修改时间。返回 FDateTime::MinValue() 表示无法获取。 */
+  static FDateTime GetAssetFileTimestamp(const FAssetData& AssetData);
+
+签名不变，仅补充注释和新增两个静态辅助方法。
+
+---
+Step 2: Private/BlueprintExporterModule.cpp
+
+2a. 新增辅助方法 WriteFileIfChanged
+
+追加在 SanitizeFileName 实现之后：
+
+bool FBlueprintExporterModule::WriteFileIfChanged(const FString& FilePath, const FString& Content)
+{
+    FString ExistingContent;
+    if (FFileHelper::LoadFileToString(ExistingContent, *FilePath))
+    {
+        if (ExistingContent == Content)
+        {
+            return false;  // 内容完全相同，跳过写入
+        }
+    }
+    
+    FFileHelper::SaveStringToFile(Content, *FilePath,
+        FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+    return true;
+}
+
+2b. 新增辅助方法 GetAssetFileTimestamp
+
+FDateTime FBlueprintExporterModule::GetAssetFileTimestamp(const FAssetData& AssetData)
+{
+    FString PackagePath;
+    if (!FPackageName::TryConvertLongPackageNameToFilename(
+            AssetData.PackageName.ToString(), PackagePath,
+            FPackageName::GetAssetPackageExtension()))
+    {
+        return FDateTime::MinValue();
+    }
+    
+    FDateTime Timestamp = IFileManager::Get().GetTimeStamp(*PackagePath);
+    return Timestamp;
+}
+
+2c. 修改 ExportBlueprintToCache — 加入第二层内容比对
+
+将 ExportBlueprintToCache 中所有直接调用 FFileHelper::SaveStringToFile 的地方
+替换为调用 WriteFileIfChanged，并统计实际写入数。
+
+修改前（伪代码）：
+
+  bool FBlueprintExporterModule::ExportBlueprintToCache(UBlueprint* Blueprint)
+  {
+      // ... Extract + Format ...
+      
+      for (const FExportedGraph& Graph : ExportedBP.Graphs)
+      {
+          FString Content = Formatter.FormatGraphOnly(Graph);
+          FString FilePath = BPDir / SanitizeFileName(Graph.GraphName) + TEXT(".txt");
+          FFileHelper::SaveStringToFile(Content, *FilePath, ...);
+      }
+      
+      // _summary.txt
+      FString SummaryContent = Formatter.FormatSummary(ExportedBP);
+      FFileHelper::SaveStringToFile(SummaryContent, *(BPDir / TEXT("_summary.txt")), ...);
+      
+      return true;
+  }
+
+修改后：
+
+  bool FBlueprintExporterModule::ExportBlueprintToCache(UBlueprint* Blueprint)
+  {
+      // ... Extract + Format（保持不变）...
+      
+      int32 FilesWritten = 0;
+      
+      for (const FExportedGraph& Graph : ExportedBP.Graphs)
+      {
+          FString Content = Formatter.FormatGraphOnly(Graph);
+          FString FilePath = BPDir / SanitizeFileName(Graph.GraphName) + TEXT(".txt");
+          if (WriteFileIfChanged(FilePath, Content))
+          {
+              FilesWritten++;
+          }
+      }
+      
+      // _summary.txt
+      FString SummaryContent = Formatter.FormatSummary(ExportedBP);
+      if (WriteFileIfChanged(BPDir / TEXT("_summary.txt"), SummaryContent))
+      {
+          FilesWritten++;
+      }
+      
+      if (FilesWritten > 0)
+      {
+          UE_LOG(LogBlueprintExporter, Log,
+              TEXT("Exported %s: %d file(s) updated"), *Blueprint->GetName(), FilesWritten);
+      }
+      else
+      {
+          UE_LOG(LogBlueprintExporter, Verbose,
+              TEXT("Exported %s: no changes detected, all files up-to-date"),
+              *Blueprint->GetName());
+      }
+      
+      return FilesWritten > 0;
+  }
+
+注意：即使所有文件都未写入（FilesWritten == 0），_summary.txt 的时间戳也不会被
+更新（因为没有 SaveStringToFile 调用），这保证了时间戳比对的一致性。
+
+2d. 修改 ExportAllBlueprints — 加入第一层时间戳检测
+
+将现有的 ExportAllBlueprints 整体替换为：
+
+void FBlueprintExporterModule::ExportAllBlueprints()
+{
+    FAssetRegistryModule& AssetRegistryModule =
+        FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+    
+    TArray<FAssetData> BlueprintAssets;
+    AssetRegistry.GetAssetsByClass(
+        UBlueprint::StaticClass()->GetClassPathName(), BlueprintAssets, true);
+    
+    const UBlueprintExporterSettings* Settings = GetDefault<UBlueprintExporterSettings>();
+    FString ExportDir = FPaths::ProjectSavedDir() / TEXT("BlueprintExports");
+    
+    TSet<FString> CurrentBPNames;
+    int32 ExportedCount = 0;
+    int32 SkippedCount = 0;
+    int32 FilteredCount = 0;
+    
+    for (const FAssetData& AssetData : BlueprintAssets)
+    {
+        FString BPName = AssetData.AssetName.ToString();
+        FString SanitizedName = SanitizeFileName(BPName);
+        
+        // ── 第一层：时间戳比对，跳过未修改的蓝图 ──
+        FString SummaryPath = ExportDir / SanitizedName / TEXT("_summary.txt");
+        FDateTime ExportTimestamp = IFileManager::Get().GetTimeStamp(*SummaryPath);
+        
+        if (ExportTimestamp > FDateTime::MinValue())
+        {
+            // 导出文件已存在，检查 .uasset 是否更新过
+            FDateTime UassetTimestamp = GetAssetFileTimestamp(AssetData);
+            
+            if (UassetTimestamp > FDateTime::MinValue()
+                && ExportTimestamp >= UassetTimestamp)
+            {
+                // .uasset 未发生变更，跳过加载
+                SkippedCount++;
+                CurrentBPNames.Add(SanitizedName);
+                continue;
+            }
+        }
+        
+        // ── 需要加载并检查 ──
+        UBlueprint* BP = Cast<UBlueprint>(AssetData.GetAsset());
+        if (!BP)
+        {
+            continue;
+        }
+        
+        if (!ShouldExport(BP, Settings))
+        {
+            FilteredCount++;
+            continue;
+        }
+        
+        // ── 第二层：内容比对在 ExportBlueprintToCache 内部执行 ──
+        bool bActuallyWrote = ExportBlueprintToCache(BP);
+        ExportedCount++;
+        CurrentBPNames.Add(SanitizedName);
+        
+        if (!bActuallyWrote)
+        {
+            // 加载了蓝图但内容完全一样（时间戳漂移的情况）
+            UE_LOG(LogBlueprintExporter, Verbose,
+                TEXT("  %s: loaded but content unchanged (timestamp drift)"),
+                *BPName);
+        }
+    }
+    
+    // 清理过期导出 + 重新生成索引
+    CleanupStaleExports(CurrentBPNames);
+    GenerateIndexFile();
+    
+    UE_LOG(LogBlueprintExporter, Log,
+        TEXT("ExportAll complete: %d exported, %d skipped (unchanged), %d filtered out, %d total assets"),
+        ExportedCount, SkippedCount, FilteredCount, BlueprintAssets.Num());
+}
+
+---
+OnPackageSaved 的配套调整
+
+OnPackageSaved 内调用的 ExportBlueprintToCache 也会自动获得第二层内容比对的
+收益（WriteFileIfChanged），无需额外修改。增量保存时的性能已经足够好（只处理
+一个蓝图），不需要时间戳检测。
+
+---
+关键设计决策
+
+┌─────────────────────────────────┬──────────────────────────┬──────────────────────────────────────────┐
+│             决策点              │          选择            │                   理由                   │
+├─────────────────────────────────┼──────────────────────────┼──────────────────────────────────────────┤
+│ 时间戳参照物                    │ _summary.txt 的文件时间  │ 每次导出都会生成，作为"最后导出时间"    │
+│                                 │                          │ 标记最可靠；无需引入额外元数据文件      │
+├─────────────────────────────────┼──────────────────────────┼──────────────────────────────────────────┤
+│ 内容比对方式                    │ 直接字符串比较           │ 蓝图导出文件通常 < 100KB，字符串比较    │
+│                                 │ (FString == FString)     │ 速度远快于磁盘写入；避免引入哈希计算    │
+│                                 │                          │ 复杂度且无误判风险                      │
+├─────────────────────────────────┼──────────────────────────┼──────────────────────────────────────────┤
+│ 时间戳漂移时的行为              │ 加载+内容比对            │ 宁可多加载一次也不丢失变更；第二层      │
+│                                 │ (fallback to 方案 A)     │ 保证即使加载了也不会做无意义写入        │
+├─────────────────────────────────┼──────────────────────────┼──────────────────────────────────────────┤
+│ _summary.txt 未写入时是否       │ 否（只有 WriteFileIfChanged │ 保持时间戳语义一致：_summary.txt 的    │
+│ 更新其时间戳                    │ 实际写入时才更新时间戳） │ 时间戳 = 内容最后变更时间               │
+├─────────────────────────────────┼──────────────────────────┼──────────────────────────────────────────┤
+│ ShouldExport 检查放在时间戳     │ 放在之后（先跳过再过滤） │ 被过滤的蓝图不会有 _summary.txt，      │
+│ 检查之前还是之后                │                          │ 时间戳检查会自然 fall through 到加载    │
+│                                 │                          │ 阶段，此时再过滤；避免对全部蓝图调     │
+│                                 │                          │ 用 GetAsset() 只为检查过滤条件         │
+├─────────────────────────────────┼──────────────────────────┼──────────────────────────────────────────┤
+│ GenerateIndexFile 是否也做      │ 否（始终重新生成）       │ 索引文件依赖磁盘目录扫描，生成速度极   │
+│ 增量检测                        │                          │ 快（< 50 目录），不值得增加复杂度      │
+└─────────────────────────────────┴──────────────────────────┴──────────────────────────────────────────┘
+
+---
+边界情况分析
+
+1. 首次运行（无导出目录）
+   → _summary.txt 不存在 → 时间戳为 MinValue → 所有蓝图走完整导出路径
+   → 行为与迭代 6 完全一致
+
+2. 用户刚执行过手动全量导出后关闭编辑器
+   → 所有 _summary.txt 时间戳 >= .uasset 时间戳
+   → 所有蓝图被跳过，关闭几乎零延迟
+   → 这是最常见的场景，也是本次优化的主要目标
+
+3. 用户修改了一个蓝图但忘记保存（编辑器内有 dirty 标记但未 Ctrl+S）
+   → .uasset 未更新 → 时间戳检查判定为无变更 → 跳过
+   → 这是正确行为：未保存的蓝图在 OnPreExit 前会被 UE 编辑器提示保存，
+     如果用户选择保存则 OnPackageSaved 会先触发增量导出，
+     如果用户选择不保存则蓝图内容确实没有变更
+
+4. Git checkout / 版本控制还原修改了 .uasset 时间戳
+   → .uasset 时间戳比 _summary.txt 新 → 蓝图被加载并重新导出
+   → 第二层内容比对：如果内容真的不同则写入，相同则跳过写入
+   → 正确行为
+
+5. 蓝图被删除
+   → AssetRegistry 中不再存在 → 不会被枚举到
+   → CleanupStaleExports 会清理对应导出目录
+   → 行为与迭代 6 一致
+
+6. 蓝图被重命名
+   → 旧名称目录被 CleanupStaleExports 清理
+   → 新名称作为新蓝图走完整导出
+   → 正确行为
+
+7. 插件代码更新导致格式化输出格式变化（如迭代 8 调整了 Formatter）
+   → .uasset 未变但输出内容实际需要更新
+   → 时间戳检查会跳过这些蓝图 ⚠️
+   → 解决方案：在插件版本更新后，用户需要手动执行一次全量导出
+     （Content Browser 右键 → Export All Blueprints to Cache）
+   → 可选增强：在 Settings 中增加版本号，版本变化时强制全量重导出（暂不实现）
+
+---
+注意事项
+
+- FFileHelper::LoadFileToString 在文件不存在时返回 false 且不修改输出字符串，
+  这正好满足"文件不存在则需要写入"的逻辑
+- IFileManager::Get().GetTimeStamp 在文件不存在时返回 FDateTime::MinValue()，
+  比对时自然 fall through 到需要导出的路径
+- FPackageName::TryConvertLongPackageNameToFilename 需要 #include "Misc/PackageName.h"，
+  确认迭代 6 的 include 列表中已有或追加
+- WriteFileIfChanged 使用 ForceUTF8WithoutBOM 与迭代 6 的写入方式保持一致
+
+---
+验证方法
+
+1. 基准测试 — 全量导出性能
+   a. 启用 bExportOnEditorClose
+   b. 打开编辑器，手动执行 Export All（Content Browser 右键）
+   c. 关闭编辑器，观察 Output Log 中的统计信息
+   d. 期望：所有蓝图显示 "skipped (unchanged)"，关闭延迟 < 1 秒
+
+2. 增量检测 — 修改单个蓝图
+   a. 手动执行 Export All 建立基准
+   b. 修改 AC_EnemyAI 中的一个节点，Ctrl+S 保存
+   c. 关闭编辑器
+   d. 期望 Output Log：AC_EnemyAI 被导出，其余蓝图 skipped
+
+3. 内容比对 — 时间戳漂移模拟
+   a. 手动 touch 某个 .uasset 文件（更新时间戳但内容不变）
+   b. 关闭编辑器
+   c. 期望：该蓝图被加载（通过时间戳检查），但 "content unchanged" 无文件写入
+
+4. 首次运行 — 删除导出目录
+   a. 删除 Saved/BlueprintExports/ 整个目录
+   b. 关闭编辑器
+   c. 期望：所有蓝图正常导出，行为与迭代 6 一致
+
+5. 过期清理 — 仍然正常
+   a. 手动创建 Saved/BlueprintExports/FakeBlueprint/ 目录
+   b. 关闭编辑器
+   c. 期望：FakeBlueprint 目录被删除

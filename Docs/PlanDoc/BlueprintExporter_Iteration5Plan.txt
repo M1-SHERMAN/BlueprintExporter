@@ -1,0 +1,187 @@
+ BlueprintExporter 第五次迭代：选中节点右键菜单不显示 Bug 修复计划
+
+ Context
+
+ 第四次迭代新增了"选中节点导出"功能，通过在蓝图图编辑器节点右键菜单中添加两个菜单项实现：
+ - "Copy Selected Nodes as Text"
+ - "Export Selected Nodes to File..."
+
+ 但两个菜单项均未出现。根本原因尚需诊断确认，最可能是以下两种之一：
+
+ 1. Lambda 从未被调用：ExtendMenu 注册的菜单路径与节点右键菜单路径不符
+ 2. Lambda 被调用但 Context 为 NULL：菜单路径可能正确，但 UGraphNodeContextMenuContext 注入链因时序问题断裂
+
+ ---
+ 涉及文件
+
+ ┌─────────────────────────────────────┬─────────────────────────────────────────────────────────────────────┐
+ │                文件                 │                              变更类型                               │
+ ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────────┤
+ │ Private/BlueprintExporterModule.cpp │ 主要修改（诊断 + 修复）                                             │
+ ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────────┤
+ │ Public/BlueprintExporterModule.h    │ 仅在使用方案 B（FGraphEditorModule extender）时需要添加一个私有成员 │
+ └─────────────────────────────────────┴─────────────────────────────────────────────────────────────────────┘
+
+ ---
+ 实施步骤
+
+ Step 1：添加诊断日志
+
+ 在 RegisterMenus() 开头（FToolMenuOwnerScoped 之后）以及 DynamicSection lambda 内部添加日志：
+
+ 位置 1：RegisterMenus() 第 35 行后
+ // === DIAGNOSTIC (remove after fix verified) ===
+ for (const TCHAR* Name : {
+     TEXT("GraphEditor.GraphContextMenu.EdGraphSchema_K2"),
+     TEXT("GraphEditor.GraphNodeContextMenu.EdGraphSchema_K2"),
+     TEXT("GraphEditor.GraphContextMenu.Common")
+ })
+ {
+     UE_LOG(LogTemp, Warning, TEXT("BlueprintExporter: IsMenuRegistered(%s) = %s"),
+         Name, UToolMenus::Get()->IsMenuRegistered(Name) ? TEXT("YES") : TEXT("NO"));
+ }
+
+ 位置 2：DynamicSection lambda 第一行（第 74 行后）
+ UE_LOG(LogTemp, Warning, TEXT("BlueprintExporter: DynamicSection ENTERED for: %s"),
+     *InMenu->GetMenuName().ToString());
+ const UGraphNodeContextMenuContext* GraphContext = InMenu->FindContext<UGraphNodeContextMenuContext>();
+ UE_LOG(LogTemp, Warning, TEXT("BlueprintExporter: GraphContext=%s, Node=%s"),
+     GraphContext ? TEXT("OK") : TEXT("NULL"),
+     (GraphContext && GraphContext->Node) ? TEXT("OK") : TEXT("NULL"));
+
+ 编译后，在编辑器中右键一个蓝图节点，在 Output Log 中过滤 "BlueprintExporter"，根据结果选择方案 A 或 B。
+
+ ---
+ Step 2A（主方案）：若 DynamicSection 从未被调用
+
+ 说明菜单路径不匹配。将 ExtendMenu 同时注册两个路径（覆盖 schema 级别和节点级别）：
+
+ 替换第 68-70 行（ExtendMenu 调用）为：
+ // Extend both schema-level and node-level paths to ensure coverage
+ for (const TCHAR* MenuPath : {
+     TEXT("GraphEditor.GraphContextMenu.EdGraphSchema_K2"),
+     TEXT("GraphEditor.GraphNodeContextMenu.EdGraphSchema_K2")
+ })
+ {
+     UToolMenu* GraphMenu = UToolMenus::Get()->ExtendMenu(MenuPath);
+     GraphMenu->AddDynamicSection(
+         "BlueprintExporterSelectedNodes",
+         FNewToolMenuDelegate::CreateLambda([this](UToolMenu* InMenu)
+         {
+             // ... 现有 lambda 内容不变，但在 null 检查中增加 Node 判断 ...
+         })
+     );
+ }
+
+ 同时，将 null 检查（第 77 行）改为：
+ // 旧:
+ if (!GraphContext || !GraphContext->Graph) { return; }
+ // 新:
+ if (!GraphContext || !GraphContext->Graph || !GraphContext->Node) { return; }
+ 增加 !GraphContext->Node 以确保只在右键实际节点时生效（右键引脚时 Node 可能为 null）。
+
+ ---
+ Step 2B（备用方案）：若 DynamicSection 被调用但 Context 始终为 NULL
+
+ 说明 UToolMenus 菜单路径正确，但父链中的 Context 注入失败（时序问题）。此时放弃 UToolMenus 扩展方式，改用
+ FGraphEditorModule Extender API（该 API 在所有 UE5 版本中对节点右键菜单均保证有效）：
+
+ 1. 修改 BlueprintExporterModule.h，添加私有成员（第 16 行后）：
+ FDelegateHandle GraphEditorMenuExtenderHandle;
+
+ 2. 将 RegisterMenus() 中整个 GraphMenu 块（第 68-146 行）替换为：
+ FGraphEditorModule& GraphEditorModule =
+     FModuleManager::GetModuleChecked<FGraphEditorModule>(TEXT("GraphEditor"));
+ GraphEditorMenuExtenderHandle =
+     GraphEditorModule.GetAllGraphEditorContextMenuExtender().Add(
+         FGraphEditorModule::FGraphEditorMenuExtender_SelectedNode::CreateLambda(
+             [this](const TSharedRef<FUICommandList>, const UEdGraph* Graph,
+                    const UEdGraphNode* /*Node*/, const UEdGraphPin* /*Pin*/,
+                    bool /*bIsReadOnly*/) -> TSharedRef<FExtender>
+             {
+                 TSharedRef<FExtender> Extender = MakeShared<FExtender>();
+                 if (!Graph) return Extender;
+                 UBlueprint* BP = FBlueprintEditorUtils::FindBlueprintForGraph(Graph);
+                 if (!BP) return Extender;
+
+                 bool bHasSelection = false;
+                 UAssetEditorSubsystem* Sub = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+                 if (Sub)
+                 {
+                     IAssetEditorInstance* Inst = Sub->FindEditorForAsset(BP, false);
+                     if (Inst && Inst->GetEditorName() == FName("BlueprintEditor"))
+                     {
+                         bHasSelection = static_cast<FBlueprintEditor*>(Inst)->GetSelectedNodes().Num() > 0;
+                     }
+                 }
+
+                 Extender->AddMenuExtension(
+                     "EdGraphSchemaNodeActions", EExtensionHook::After, nullptr,
+                     FMenuExtensionDelegate::CreateLambda(
+                         [this, Graph, bHasSelection](FMenuBuilder& MenuBuilder)
+                         {
+                             MenuBuilder.BeginSection("BlueprintExporterNodes",
+                                 LOCTEXT("SelectedNodesSection", "Blueprint Exporter"));
+                             MenuBuilder.AddMenuEntry(
+                                 LOCTEXT("CopySelectedLabel", "Copy Selected Nodes as Text"),
+                                 bHasSelection
+                                     ? LOCTEXT("CopySelectedTooltip", "Copy selected nodes as AI-readable plain text to
+  clipboard")
+                                     : LOCTEXT("CopySelectedTooltipDisabled", "No nodes selected"),
+                                 FSlateIcon(),
+                                 FUIAction(
+                                     FExecuteAction::CreateLambda([this, Graph]() {
+ CopySelectedNodesToClipboard(Graph); }),
+                                     FCanExecuteAction::CreateLambda([bHasSelection]() { return bHasSelection; })
+                                 )
+                             );
+                             MenuBuilder.AddMenuEntry(
+                                 LOCTEXT("ExportSelectedLabel", "Export Selected Nodes to File..."),
+                                 bHasSelection
+                                     ? LOCTEXT("ExportSelectedTooltip", "Export selected nodes as AI-readable plain
+ text to a file")
+                                     : LOCTEXT("ExportSelectedTooltipDisabled", "No nodes selected"),
+                                 FSlateIcon(),
+                                 FUIAction(
+                                     FExecuteAction::CreateLambda([this, Graph]() { ExportSelectedNodesToFile(Graph);
+ }),
+                                     FCanExecuteAction::CreateLambda([bHasSelection]() { return bHasSelection; })
+                                 )
+                             );
+                             MenuBuilder.EndSection();
+                         }
+                     )
+                 );
+                 return Extender;
+             }
+         )
+     );
+
+ 3. 在 ShutdownModule() 开头添加 extender 清理：
+ if (GraphEditorMenuExtenderHandle.IsValid())
+ {
+     if (FGraphEditorModule* GraphEditorModule =
+         FModuleManager::GetModulePtr<FGraphEditorModule>(TEXT("GraphEditor")))
+     {
+         GraphEditorModule->GetAllGraphEditorContextMenuExtender().Remove(
+             GraphEditorMenuExtenderHandle);
+     }
+     GraphEditorMenuExtenderHandle.Reset();
+ }
+
+ ---
+ Step 3：清理诊断代码
+
+ 确认菜单项正确显示后，删除 Step 1 添加的所有 UE_LOG 语句。
+
+ ---
+ 验证步骤
+
+ 1. 编译通过，无报错
+ 2. 打开任意蓝图（如 AC_EnemyAI）
+ 3. 右键点击空白区域 → 不应出现 "Blueprint Exporter" section
+ 4. 选中 2-3 个节点，右键 → 应出现 "Blueprint Exporter" section 及两个菜单项（可用状态）
+ 5. 点击 "Copy Selected Nodes as Text" → 粘贴到文本编辑器，确认内容正确
+ 6. 点击 "Export Selected Nodes to File..." → 弹出保存对话框，保存后内容正确
+ 7. 不选中任何节点，右键一个节点 → 两个菜单项应为灰显（disabled）状态
+ 8. 在折叠子图（Macro/Collapsed Graph）中重复步骤 4-7

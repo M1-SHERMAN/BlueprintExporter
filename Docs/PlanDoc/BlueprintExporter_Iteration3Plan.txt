@@ -1,0 +1,137 @@
+ BlueprintExporter 第三次迭代实施计划
+
+ Context
+
+ 基于第二次迭代（v3.0，7256 行）的验证结果，本次迭代聚焦输出体积压缩。消费者为
+ AI，无需人类可读排版。目标在不丢失任何已接线逻辑信息的前提下，移除冗余行，预计减少 ~900+ 行（12-13%），从 7256
+ 行降至约 6340 行。
+
+ 修改文件： C:\UE Project\CodeA\Plugins\BlueprintExporter\Source\BlueprintExporter\Private\BlueprintTextFormatter.cpp
+
+ ---
+ 五项变更
+
+ 变更 #1：移除 ← exec 输入 Pin（预计 -415 行）
+
+ 位置： GetMeaningfulPins（约 line 399），在 K2Node_Knot 跳过逻辑（line 417-421）之后添加：
+
+ // Skip exec input pins — exec output from source already declares this connection
+ if (Pin.Category == TEXT("exec") && Pin.Direction == TEXT("Input"))
+ {
+     continue;
+ }
+
+ 原理： exec 输入 pin 与对端的 exec 输出 pin 表达同一条边的两端，完全冗余。非 exec 的输入
+ pin（含参数值、数据来源）不受影响。
+
+ ---
+ 变更 #2：移除 REROUTE 节点条目（预计 -101 行）
+
+ 位置： FormatGraph，node 循环（line 133-137）内添加跳过：
+
+ for (const FExportedNode& Node : SortedNodes)
+ {
+     if (Node.NodeClass == TEXT("K2Node_Knot"))  // 新增
+     {
+         continue;
+     }
+     Lines.Add(FormatNode(Node));
+     Lines.Add(TEXT(""));
+ }
+
+ 原理： GetMeaningfulPins 已过滤掉 Knot 的所有 pin，节点条目只剩 [K2Node_Knot_X] REROUTE（纯占位符）。Exec/Data Flow
+ 汇总中已通过 ResolveRerouteChain 穿透处理，信息不丢失。
+
+ ---
+ 变更 #3：移除未连接非 exec 输出 Pin（预计 -103 行）
+
+ 位置： GetMeaningfulPins，在最后 Meaningful.Add(Pin) 之前（约 line 461）添加：
+
+ // Skip unconnected non-exec output pins with no default (not consumed by any node)
+ if (Pin.Direction == TEXT("Output")
+     && Pin.Category != TEXT("exec")
+     && Pin.LinkedTo.Num() == 0
+     && Pin.DefaultValue.IsEmpty())
+ {
+     continue;
+ }
+
+ 原理： 未连接的非 exec 输出 pin（如函数返回值、BreakStruct
+ 字段）在蓝图中无消费者，仅表示"此输出可用"，对理解实际逻辑无价值。
+ 保留例外（已被变更 #1 之前的逻辑处理）： Branch/SwitchEnum 的命名 exec 输出（如 → False (exec)）在 step 4（exec
+ 无连接处理）阶段就已被保留，不受此规则影响。
+
+ ---
+ 变更 #4：精简空行（预计 -300+ 行）
+
+ 位置： FormatGraph（line 120-157），两处修改：
+
+ a) 移除节点间空行（line 136）：
+ // 删除：Lines.Add(TEXT(""));
+
+ b) 在 === Execution Flow === 前添加空行，并处理无 flow 时的尾部空行：
+
+ 将 line 139-155 的 exec/data flow 块改为：
+ FString ExecFlow = FormatExecutionFlow(SortedNodes, NodeMap);
+ if (!ExecFlow.IsEmpty())
+ {
+     Lines.Add(TEXT(""));                         // 节点块→Flow 分隔
+     Lines.Add(TEXT("=== Execution Flow ==="));
+     Lines.Add(ExecFlow);
+     Lines.Add(TEXT(""));                         // 保留：Flow 后空行
+
+     FString DataFlow = FormatDataFlow(SortedNodes, NodeMap);
+     if (!DataFlow.IsEmpty())
+     {
+         Lines.Add(TEXT("=== Data Flow ==="));
+         Lines.Add(DataFlow);
+         Lines.Add(TEXT(""));                     // 保留：尾部空行（Graph 间分隔）
+     }
+ }
+ else
+ {
+     Lines.Add(TEXT(""));                         // 无 Flow 时保留尾部空行（Graph 间分隔）
+ }
+
+ 保留不变的空行：
+ - Format()：Blueprint header 后（line 17）、Variables 后（line 26）
+ - FormatGraph()：Graph header 后（line 120）、Flow content 后
+
+ ---
+ 变更 #5：变量区 trivial 默认值省略（缩短 ~12 行）
+
+ 位置 A： IsTrivialDefault（line 467-478），扩展 trivial 集合：
+ static const TSet<FString> TrivialValues = {
+     TEXT("0"), TEXT("0.0"), TEXT("0.000000"), TEXT("0, 0, 0"),
+     TEXT("false"), TEXT("None"),
+     TEXT("()"),                                    // 空结构体 / delegate
+     TEXT("(())"),                                  // 空数组
+     TEXT("(X=0.000000,Y=0.000000,Z=0.000000)"),   // 零向量
+ };
+
+ 位置 B： FormatVariables（line 80-83），添加 trivial 检查：
+ if (!Var.DefaultValue.IsEmpty() && !IsTrivialDefault(Var.DefaultValue))
+ {
+     Line += FString::Printf(TEXT(" = %s"), *Var.DefaultValue);
+ }
+
+ ---
+ 实施顺序
+
+ 1. GetMeaningfulPins 中添加 exec input 过滤（变更 #1）
+ 2. GetMeaningfulPins 中添加未连接非 exec 输出过滤（变更 #3）
+ 3. FormatGraph node 循环中跳过 K2Node_Knot（变更 #2）
+ 4. FormatGraph 中重构空行逻辑（变更 #4）
+ 5. IsTrivialDefault + FormatVariables 中扩展 trivial 默认值（变更 #5）
+
+ ---
+ 验证方法
+
+ 1. 编译插件，对 AC_EnemyAI 运行导出，生成 AC_EnemyAI_exported_4.0.txt
+ 2. 逻辑完整性：
+   - 取任意 CALL 节点，确认 → then (exec) 连接与 v3.0 一致，← execute (exec) 行已消失
+   - 搜索 REROUTE，确认 0 个匹配
+   - 取 K2Node_BreakStruct_4，确认已连接的输出 pin 保留，未连接的已移除
+   - 确认 Branch → False (exec) / SwitchEnum 命名 exec 输出仍保留
+ 3. 空行检查： 节点之间无空行；---/=== 分隔符前后各有 1 行空行
+ 4. 行数对比： 总行数减少约 900+ 行（目标：6340 行左右）

@@ -1,0 +1,256 @@
+ BlueprintExporter 迭代实现计划
+
+ Context
+
+ BlueprintExporter 插件将 UE 蓝图逻辑导出为纯文本供 AI 消费。基本功能已实现并通过编译和测试，现在需要根据 Code Review
+ 和 Codex 测试反馈进行 6 项迭代改进（P2#7 暂缓）。
+
+ 实施顺序
+
+ 从简单到复杂，减少依赖冲突风险：#2 → #5 → #4 → #6 → #3 → #1
+
+ ---
+ #2 Interface Graph 遍历 [小]
+
+ 文件: BlueprintGraphExtractor.cpp
+
+ 在 Extract() 的 MacroGraphs 循环（第 66-72 行）之后、return Result 之前，插入：
+
+ // Interface graphs
+ for (const FBPInterfaceDescription& InterfaceDesc : Blueprint->ImplementedInterfaces)
+ {
+     for (UEdGraph* Graph : InterfaceDesc.Graphs)
+     {
+         if (Graph)
+         {
+             Result.Graphs.Add(ExtractGraph(Graph, TEXT("Interface")));
+         }
+     }
+ }
+
+ 无需新 include — FBPInterfaceDescription 已在 Engine/Blueprint.h 中定义。Formatter 已能处理任意 GraphType
+ 字符串，输出为 --- Graph: MyFunc (Interface) ---。
+
+ ---
+ #5 FormatPin 默认值显示修正 [小]
+
+ 文件: BlueprintTextFormatter.cpp — FormatPin() 第 146-161 行
+
+ 替换为：
+
+ // Default value: only show non-trivial defaults; exec/delegate never show
+ FString Default;
+ if (!Pin.DefaultValue.IsEmpty()
+     && !IsTrivialDefault(Pin.DefaultValue)
+     && Pin.Category != TEXT("exec")
+     && Pin.Category != TEXT("delegate"))
+ {
+     Default = FString::Printf(TEXT(" = %s"), *Pin.DefaultValue);
+ }
+
+ 移除了 else if 分支（该分支会在无连接时显示 trivial 默认值如 0、false、None，产生噪音）。
+
+ ---
+ #4 枚举默认值可读化 [小]
+
+ 文件: BlueprintGraphExtractor.cpp — ExtractPin() 第 285-288 行
+
+ 在 Result.DefaultValue = Pin->DefaultValue;（第 287 行）之后，插入枚举解析逻辑：
+
+ Result.DefaultValue = Pin->DefaultValue;
+
+ // Resolve enum display names (e.g. "NewEnumerator0" -> "Idle")
+ if (Pin->PinType.PinSubCategoryObject.IsValid())
+ {
+     UEnum* EnumPtr = Cast<UEnum>(Pin->PinType.PinSubCategoryObject.Get());
+     if (EnumPtr)
+     {
+         int64 EnumValue = EnumPtr->GetValueByNameString(Result.DefaultValue);
+         if (EnumValue != INDEX_NONE)
+         {
+             FText DisplayName = EnumPtr->GetDisplayNameTextByValue(EnumValue);
+             if (!DisplayName.IsEmpty())
+             {
+                 Result.DefaultValue = DisplayName.ToString();
+             }
+         }
+     }
+ }
+
+ 无需新 include — UEnum 通过 CoreMinimal.h 可达。GetValueByNameString 同时支持短名称和全限定名。
+
+ ---
+ #6 Reroute Pin 名称修正 [小]
+
+ 文件: BlueprintTextFormatter.h + BlueprintTextFormatter.cpp
+
+ Header（第 23 行）
+
+ // 旧
+ FString ResolveRerouteChain(const FString& NodeName, const TMap<FString, const FExportedNode*>& NodeMap);
+ // 新
+ TPair<FString, FString> ResolveRerouteChain(const FString& NodeName, const FString& OriginalPinName, const
+ TMap<FString, const FExportedNode*>& NodeMap);
+
+ 实现（第 383-427 行）
+
+ 在 while 循环中追踪 CurrentPinName：每次跟随 reroute 的 output pin 时，将 Pin.LinkedTo[0].Value（下一节点的 input pin
+ 名）赋给 CurrentPinName。返回 TPair<FString, FString>(Current, CurrentPinName)。
+
+ 调用方更新
+
+ - FormatExecutionFlow（第 450 行）：auto [FinalTarget, _] = ResolveRerouteChain(Link.Key, Link.Value, NodeMap);
+ - FormatDataFlow（第 495-500 行）：auto [FinalNode, FinalPin] = ResolveRerouteChain(Link.Key, Link.Value,
+ NodeMap);，输出改用 FinalPin 替代 Link.Value
+
+ ---
+ #3 变量声明区 [中]
+
+ BlueprintExporterTypes.h
+
+ 在 FExportedNode 之前添加：
+
+ struct FExportedVariable
+ {
+     FString Name;
+     FString Type;           // "float", "E_AI_State", "Actor", "Vector"
+     FString ContainerType;  // "Array", "Set", "Map", or empty
+     FString DefaultValue;
+     TArray<FString> Flags;  // "EditAnywhere", "BlueprintReadWrite", etc.
+ };
+
+ 在 FExportedBlueprint 中，Graphs 之前添加：
+
+ TArray<FExportedVariable> Variables;
+
+ BlueprintGraphExtractor.h
+
+ 添加 private 方法：
+
+ static FString ResolveVariableType(const FEdGraphPinType& PinType);
+
+ BlueprintGraphExtractor.cpp — Extract()
+
+ 在 Result.ParentClass 赋值之后、EventGraph 循环之前，遍历 Blueprint->NewVariables：
+ - 用 ResolveVariableType() 解析类型（逻辑复用自 ExtractPin 的 SubCategoryObject/SubCategory/Category 优先级）
+ - 解析 ContainerType（同 ExtractPin 的 switch 逻辑）
+ - DefaultValue 从 VarDesc.DefaultValue 取，枚举值复用 #4 的解析逻辑
+ - Flags 从 VarDesc.PropertyFlags 位掩码解码：CPF_Edit → EditAnywhere/EditDefaultsOnly，CPF_BlueprintVisible +
+ CPF_BlueprintReadOnly → BlueprintReadOnly/BlueprintReadWrite，CPF_Net → Replicated
+
+ BlueprintTextFormatter.h
+
+ 添加 private 方法：
+
+ FString FormatVariables(const TArray<FExportedVariable>& Variables);
+
+ BlueprintTextFormatter.cpp
+
+ FormatVariables() 实现：
+ - 计算 Name 和 Type 列的最大宽度，用 FString::ChrN() 补齐对齐
+ - 输出格式：  Name       : Type       = Default  [Flags]
+
+ Format() 中，在 header（第 17 行空行）之后、Graphs 循环之前插入调用。
+
+ ---
+ #1 Composite 子图展开 [中]
+
+ BlueprintExporterTypes.h
+
+ 因为 FExportedNode 定义在 FExportedGraph 之前（而 FExportedGraph 包含
+ TArray<FExportedNode>），直接嵌套会产生循环依赖。解决方案：
+
+ struct FExportedGraph; // 前向声明（放在 FExportedNode 之前）
+
+ struct FExportedNode
+ {
+     // ... 现有字段 ...
+     TUniquePtr<FExportedGraph> SubGraph; // Composite 节点的展开子图
+ };
+
+ TUniquePtr 只需要前向声明即可声明成员；析构时 FExportedGraph 已完整定义。
+
+ BlueprintGraphExtractor.cpp
+
+ 新 include：
+
+ #include "K2Node_Composite.h"
+
+ K2Node_Composite.h 位于 BlueprintGraph 模块（已是依赖）。
+
+ ExtractNodeProperties()（第 227 行 SwitchEnum 之后）添加：
+
+ if (UK2Node_Composite* CompositeNode = Cast<UK2Node_Composite>(Node))
+ {
+     if (CompositeNode->BoundGraph)
+     {
+         OutNode.Properties.Emplace(TEXT("Collapsed"), CompositeNode->BoundGraph->GetName());
+     }
+     return;
+ }
+
+ ExtractNode()（第 109 行 ExtractNodeProperties 之后）添加：
+
+ if (UK2Node_Composite* CompositeNode = Cast<UK2Node_Composite>(Node))
+ {
+     if (CompositeNode->BoundGraph)
+     {
+         Result.SubGraph = MakeUnique<FExportedGraph>(
+             ExtractGraph(CompositeNode->BoundGraph, TEXT("Collapsed")));
+     }
+ }
+
+ BlueprintTextFormatter.cpp
+
+ GetReadableType() 添加：
+
+ TypeMap.Add(TEXT("K2Node_Composite"), TEXT("COLLAPSED"));
+ TypeMap.Add(TEXT("K2Node_Tunnel"), TEXT("TUNNEL"));
+
+ FormatNode() 末尾（第 126 行 return 之前）添加子图渲染：
+
+ if (Node.SubGraph)
+ {
+     FString SubContent = FormatGraph(*Node.SubGraph);
+     if (!SubContent.IsEmpty())
+     {
+         TArray<FString> SubLines;
+         SubContent.ParseIntoArrayLines(SubLines);
+         for (const FString& SubLine : SubLines)
+         {
+             Lines.Add(FString::Printf(TEXT("  %s"), *SubLine));
+         }
+     }
+ }
+
+ 递归的 FormatGraph 调用会自动处理嵌套 Composite 节点，每层增加 2 空格缩进。
+
+ ---
+ 涉及文件总览
+
+ ┌─────────────────────────────┬────────────────────────────────────────────────────────────────────────────────────┐
+ │            文件             │                                       修改项                                       │
+ ├─────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+ │ BlueprintExporterTypes.h    │ #1（SubGraph 字段 + 前向声明）、#3（FExportedVariable + Variables 字段）           │
+ ├─────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+ │ BlueprintGraphExtractor.h   │ #3（ResolveVariableType 声明）                                                     │
+ ├─────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+ │ BlueprintGraphExtractor.cpp │ #1（Composite 检测+展开）、#2（Interface 遍历）、#3（变量提取）、#4（枚举解析）    │
+ ├─────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+ │ BlueprintTextFormatter.h    │ #3（FormatVariables 声明）、#6（ResolveRerouteChain 签名变更）                     │
+ ├─────────────────────────────┼────────────────────────────────────────────────────────────────────────────────────┤
+ │ BlueprintTextFormatter.cpp  │ #1（子图渲染+GetReadableType）、#3（FormatVariables+Format                         │
+ │                             │ 调用）、#5（默认值修正）、#6（Reroute 实现+调用方）                                │
+ └─────────────────────────────┴────────────────────────────────────────────────────────────────────────────────────┘
+
+ 验证方式
+
+ 1. 编译通过：在 VS 中构建 BlueprintExporterEditor 模块
+ 2. 功能测试：在编辑器中对包含以下特征的蓝图执行"Export Blueprint Logic"：
+   - 实现了 Interface 的蓝图 → 验证 Interface 函数图被导出
+   - 包含 Composite（折叠）节点的蓝图 → 验证子图内容展开
+   - 包含枚举类型变量的蓝图 → 验证枚举值显示为可读名称
+   - 包含 Reroute 节点的数据流 → 验证目标 Pin 名正确
+   - 变量声明区出现在输出开头、类型和标记正确
+   - trivial 默认值（0, false, None）不再出现在无连接的 pin 上
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌

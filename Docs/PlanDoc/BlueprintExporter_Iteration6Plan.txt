@@ -1,0 +1,255 @@
+ BlueprintExporter 第六次迭代实施计划
+
+ Context
+
+ 前五次迭代完成了手动导出功能（Content Browser 右键、Graph 右键选中节点导出）。第六次迭代的目标是自动化：蓝图 Ctrl+S
+ 时自动增量导出，编辑器关闭前全量刷新，输出改为分层目录结构，并加入可配置的类型过滤器，使 ClaudeCode
+ 在编辑器关闭状态下可直接按需读取蓝图逻辑文件。
+
+ ---
+ 新增 / 修改文件清单
+
+ ┌───────────────────────────────────────┬──────┐
+ │                 文件                  │ 操作 │
+ ├───────────────────────────────────────┼──────┤
+ │ Public/BlueprintExporterSettings.h    │ 新建 │
+ ├───────────────────────────────────────┼──────┤
+ │ Private/BlueprintExporterSettings.cpp │ 新建 │
+ ├───────────────────────────────────────┼──────┤
+ │ Public/BlueprintExporterModule.h      │ 修改 │
+ ├───────────────────────────────────────┼──────┤
+ │ Private/BlueprintExporterModule.cpp   │ 修改 │
+ ├───────────────────────────────────────┼──────┤
+ │ Public/BlueprintTextFormatter.h       │ 修改 │
+ ├───────────────────────────────────────┼──────┤
+ │ Private/BlueprintTextFormatter.cpp    │ 修改 │
+ ├───────────────────────────────────────┼──────┤
+ │ BlueprintExporter.Build.cs            │ 修改 │
+ └───────────────────────────────────────┴──────┘
+
+ ---
+ 实施步骤
+
+ Phase A — 基础自动化（P0 #1 + P1 #3）
+
+ Step 1: BlueprintExporter.Build.cs
+
+ 在 PrivateDependencyModuleNames 中追加：
+ "AssetRegistry",
+ "DeveloperSettings",
+
+ ---
+ Step 2: Public/BlueprintExporterSettings.h（新建）
+
+ #pragma once
+ #include "CoreMinimal.h"
+ #include "Engine/DeveloperSettings.h"
+ #include "BlueprintExporterSettings.generated.h"
+
+ UCLASS(config=EditorPerProjectUserSettings, defaultconfig,
+        meta=(DisplayName="Blueprint Exporter"))
+ class UBlueprintExporterSettings : public UDeveloperSettings
+ {
+     GENERATED_BODY()
+ public:
+     UBlueprintExporterSettings();
+     virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
+     virtual FName GetSectionName() const override  { return TEXT("Blueprint Exporter"); }
+
+     // Auto Export
+     UPROPERTY(Config, EditAnywhere, Category="Auto Export")
+     bool bAutoExportOnSave = false;
+     UPROPERTY(Config, EditAnywhere, Category="Auto Export")
+     bool bExportOnEditorClose = false;
+
+     // Blueprint Type Filter
+     UPROPERTY(Config, EditAnywhere, Category="Export Filter|Blueprint Type")
+     bool bExportNormalBlueprint = true;
+     UPROPERTY(Config, EditAnywhere, Category="Export Filter|Blueprint Type")
+     bool bExportFunctionLibrary = true;
+     UPROPERTY(Config, EditAnywhere, Category="Export Filter|Blueprint Type")
+     bool bExportMacroLibrary = false;
+     UPROPERTY(Config, EditAnywhere, Category="Export Filter|Blueprint Type")
+     bool bExportInterface = false;
+     UPROPERTY(Config, EditAnywhere, Category="Export Filter|Blueprint Type")
+     bool bExportLevelScript = false;
+
+     // Parent Class Filter
+     UPROPERTY(Config, EditAnywhere, Category="Export Filter|Parent Class", meta=(AllowAbstract="true"))
+     TArray<FSoftClassPath> ParentClassFilter;      // 白名单，空=不限制
+     UPROPERTY(Config, EditAnywhere, Category="Export Filter|Parent Class", meta=(AllowAbstract="true"))
+     TArray<FSoftClassPath> ExcludedParentClasses;  // 黑名单，优先于白名单
+
+     // Content Filter
+     UPROPERTY(Config, EditAnywhere, Category="Export Filter|Content", meta=(ClampMin=1, ClampMax=100))
+     int32 MinNodeCount = 2;
+ };
+
+ Private/BlueprintExporterSettings.cpp（新建）
+
+ #include "BlueprintExporterSettings.h"
+ UBlueprintExporterSettings::UBlueprintExporterSettings() {}
+
+ ---
+ Step 3: Public/BlueprintExporterModule.h
+
+ 在 private: 区块末尾追加以下声明（前向声明 class UBlueprintExporterSettings 加在文件顶部 class 外）：
+
+ // --- Iteration 6 ---
+ void OnPackageSaved(const FString& PackageFilename, UPackage* Package,
+                     FObjectPostSaveContext SaveContext);
+ void OnEditorPreExit();
+ bool ExportBlueprintToCache(UBlueprint* Blueprint);
+ void ExportAllBlueprints();
+ void GenerateIndexFile();
+ void CleanupStaleExports(const TSet<FString>& CurrentBPNames);
+ bool ShouldExport(UBlueprint* Blueprint, const class UBlueprintExporterSettings* Settings) const;
+ static FString SanitizeFileName(const FString& Name);
+
+ FDelegateHandle PackageSavedHandle;
+ FDelegateHandle PreExitHandle;
+
+ ---
+ Step 4: Private/BlueprintExporterModule.cpp
+
+ 新增 includes（追加到现有 include 块末尾）：
+ #include "BlueprintExporterSettings.h"
+ #include "UObject/Package.h"
+ #include "UObject/ObjectSaveContext.h"
+ #include "UObject/UObjectIterator.h"   // ForEachObjectWithPackage
+ #include "AssetRegistry/AssetRegistryModule.h"
+ #include "AssetRegistry/IAssetRegistry.h"
+ #include "HAL/FileManager.h"
+ #include "Misc/Paths.h"
+ #include "Misc/DateTime.h"
+
+ StartupModule() 末尾追加：
+ PackageSavedHandle = UPackage::PackageSavedWithContextEvent.AddRaw(
+     this, &FBlueprintExporterModule::OnPackageSaved);
+ PreExitHandle = FCoreDelegates::OnPreExit.AddRaw(
+     this, &FBlueprintExporterModule::OnEditorPreExit);
+
+ ShutdownModule() 开头追加（在现有清理之前）：
+ UPackage::PackageSavedWithContextEvent.Remove(PackageSavedHandle);
+ FCoreDelegates::OnPreExit.Remove(PreExitHandle);
+
+ RegisterMenus() 的 Section 末尾追加"Export All"菜单项：
+ Section.AddMenuEntry(
+     "ExportAllBlueprintsToCache",
+     LOCTEXT("ExportAllLabel", "Export All Blueprints to Cache"),
+     LOCTEXT("ExportAllTooltip", "Scan all Blueprints and export to Saved/BlueprintExports/"),
+     FSlateIcon(),
+     FToolMenuExecuteAction::CreateLambda([this](const FToolMenuContext&)
+     {
+         ExportAllBlueprints();
+     })
+ );
+
+ 新增方法实现（追加在 ExportSelectedNodesToFile 后、#undef LOCTEXT_NAMESPACE 前）：
+
+ - SanitizeFileName — 将非字母数字字符（除 _、-）替换为 _
+ - ShouldExport — 按 BlueprintType → 黑名单 → 白名单 → MinNodeCount 顺序过滤（见需求文档 §3b）
+ - OnPackageSaved — 检查 bAutoExportOnSave，ForEachObjectWithPackage 找 UBlueprint，通过过滤则调用
+ ExportBlueprintToCache + GenerateIndexFile
+ - OnEditorPreExit — 检查 bExportOnEditorClose，调用 ExportAllBlueprints
+ - ExportBlueprintToCache — Extract → 创建 {SavedDir}/BlueprintExports/{BPName}/ → 每个 Graph 写
+ {SanitizedGraphName}.txt（FormatGraphOnly）→ 写 _summary.txt（FormatSummary）
+ - ExportAllBlueprints — AssetRegistry 枚举所有 UBlueprint，逐个调用
+ ExportBlueprintToCache，收集已导出名称集合，最后调用 GenerateIndexFile + CleanupStaleExports
+ - GenerateIndexFile — 扫描 BlueprintExports/ 下所有非 _ 开头子目录，读取各 _summary.txt 提取 BP 名称/父类/Graph
+ 列表/变量数，写 _index.txt 和 README.md
+ - CleanupStaleExports — 枚举子目录，删除不在 CurrentBPNames 集合中的目录
+
+ ---
+ Phase B — 格式化层（P1 #4 分层输出）
+
+ Step 5: Public/BlueprintTextFormatter.h
+
+ 在 public: 区块末尾追加：
+ FString FormatGraphOnly(const FExportedGraph& Graph);
+ FString FormatSummary(const FExportedBlueprint& Blueprint);
+
+ Step 6: Private/BlueprintTextFormatter.cpp
+
+ 追加两个方法实现：
+
+ FString FBlueprintTextFormatter::FormatGraphOnly(const FExportedGraph& Graph)
+ {
+     // SelectionContext 为空（默认），FormatGraph 以完整模式运行
+     return FormatGraph(Graph);
+ }
+
+ FString FBlueprintTextFormatter::FormatSummary(const FExportedBlueprint& Blueprint)
+ {
+     TArray<FString> Lines;
+     // 蓝图 header（与 Format() 一致）
+     Lines.Add(Blueprint.ParentClass.IsEmpty()
+         ? FString::Printf(TEXT("=== Blueprint: %s ==="), *Blueprint.BlueprintName)
+         : FString::Printf(TEXT("=== Blueprint: %s (Parent: %s) ==="),
+             *Blueprint.BlueprintName, *Blueprint.ParentClass));
+     Lines.Add(TEXT(""));
+
+     // 复用已有的 FormatVariables
+     if (Blueprint.Variables.Num() > 0)
+     {
+         FString VarSection = FormatVariables(Blueprint.Variables);
+         if (!VarSection.IsEmpty())
+         {
+             Lines.Add(VarSection);
+             Lines.Add(TEXT(""));
+         }
+     }
+
+     // Graph 列表表格（对齐，显示 node 数）
+     Lines.Add(TEXT("=== Graphs ==="));
+     int32 MaxNameWidth = 9;
+     for (const FExportedGraph& G : Blueprint.Graphs)
+         MaxNameWidth = FMath::Max(MaxNameWidth, G.GraphName.Len());
+
+     for (const FExportedGraph& G : Blueprint.Graphs)
+     {
+         FString NamePad = G.GraphName + FString::ChrN(MaxNameWidth - G.GraphName.Len(), ' ');
+         Lines.Add(FString::Printf(TEXT("  %s  (%s)  %d nodes"),
+             *NamePad, *G.GraphType, G.Nodes.Num()));
+     }
+     return FString::Join(Lines, TEXT("\n")).TrimEnd();
+ }
+
+ ---
+ 关键设计决策
+
+ ┌────────────────────────────┬─────────────────────────────┬──────────────────────────────────────────────────────┐
+ │           决策点           │            选择             │                         理由                         │
+ ├────────────────────────────┼─────────────────────────────┼──────────────────────────────────────────────────────┤
+ │ FormatGraphOnly 实现       │ 一行委托给私有 FormatGraph  │ Format() 和内部 Composite 渲染已依赖                 │
+ │                            │                             │ FormatGraph，无需改动现有调用链                      │
+ ├────────────────────────────┼─────────────────────────────┼──────────────────────────────────────────────────────┤
+ │ 增量保存后是否重写全局索引 │ 是（磁盘扫描重新生成）      │ 简单且始终与磁盘同步；索引生成速度快（<50 蓝图目录） │
+ ├────────────────────────────┼─────────────────────────────┼──────────────────────────────────────────────────────┤
+ │ "Export All" 菜单位置      │ Content Browser             │ 保持代码一致，无需新增 LevelEditor 模块依赖          │
+ │                            │ 右键，追加到现有 Section    │                                                      │
+ ├────────────────────────────┼─────────────────────────────┼──────────────────────────────────────────────────────┤
+ │ bAutoExportOnSave 默认值   │ false                       │ 用户显式启用，避免意外导出                           │
+ ├────────────────────────────┼─────────────────────────────┼──────────────────────────────────────────────────────┤
+ │ 编辑器关闭前回调           │ FCoreDelegates::OnPreExit   │ 规格书推荐；若触发时机太晚导致 crash，备选为         │
+ │                            │                             │ FEditorDelegates::OnShutdownPostPackagesSaved        │
+ └────────────────────────────┴─────────────────────────────┴──────────────────────────────────────────────────────┘
+
+ ---
+ 注意事项
+
+ - ForEachObjectWithPackage 头文件：UE5 中位于 UObject/UObjectIterator.h，若找不到可改用 GetObjectsWithPackage 或遍历
+ TObjectRange<UBlueprint>
+ - GetAssetsByClass API：UE5.1+ 接受 FTopLevelAssetPath（StaticClass()->GetClassPathName()）；UE5.0 接受
+ FName(TEXT("Blueprint"))
+ - FObjectPostSaveContext：位于 UObject/ObjectSaveContext.h，某些 UE5 版本可能在 UObject/SavePackage.h
+
+ ---
+ 验证方法
+
+ 1. 增量导出（#1 + #3）：在 Project Settings 中启用 bAutoExportOnSave，保存 AC_EnemyAI，确认
+ Saved/BlueprintExports/AC_EnemyAI/ 目录生成；保存 Widget 蓝图确认未生成目录
+ 2. 分层结构（#4）：检查 AC_EnemyAI/_summary.txt 含变量表和 Graph 列表；各 .txt 文件含单 Graph 内容但无变量声明区
+ 3. 全量导出（#2）：启用 bExportOnEditorClose，关闭编辑器，确认 _index.txt 和 README.md 生成
+ 4. 过期清理（#5）：手动创建 Saved/BlueprintExports/FakeBlueprint/，触发全量导出，确认目录被删除
+ 5. 端到端：在终端依次读取 _index.txt → AC_EnemyAI/_summary.txt → AC_EnemyAI/Investigate.txt，验证信息层级完整

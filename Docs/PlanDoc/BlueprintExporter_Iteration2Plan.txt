@@ -1,0 +1,195 @@
+ BlueprintExporter 第二次迭代 — 实施计划
+
+ Context
+
+ 第一次迭代完成了插件的基础框架（变量声明区、Composite 子图展开、Interface 图遍历、枚举可读化、Reroute
+ 穿透等）。第二次迭代基于对 AC_EnemyAI 实际导出结果的审查，主要目标是修复 P0
+ 遗留问题（变量默认值无效、属性标记噪音），并清理输出中的 P1 噪音（SwitchEnum 隐藏
+ Pin、LatentActionInfo、OutputDelegate、_C 后缀）。
+
+ ---
+ 实施范围（P0 + P1，P2 暂缓）
+
+ Change 1 — P0 #1：变量默认值从 CDO 读取
+
+ 问题根因：FBPVariableDescription::DefaultValue 在 Blueprint 变量中通常为空；实际默认值在编译后存于 Generated Class 的
+ CDO（Class Default Object）中。
+
+ 文件：BlueprintGraphExtractor.cpp，Extract() 方法，变量循环内（第 67-87 行附近）
+
+ 实现：先保留现有的 FBPVariableDescription::DefaultValue 读取（部分情况有效）。若该值仍为空，则通过 CDO 回退：
+
+ // Fallback: read default value from CDO
+ if (Var.DefaultValue.IsEmpty() && Blueprint->GeneratedClass)
+ {
+     UObject* CDO = Blueprint->GeneratedClass->GetDefaultObject(false);
+     if (CDO)
+     {
+         FProperty* Prop = Blueprint->GeneratedClass->FindPropertyByName(VarDesc.VarName);
+         if (Prop)
+         {
+             FString ExportedValue;
+             Prop->ExportText_InContainer(0, ExportedValue, CDO, nullptr, nullptr, PPF_None);
+             if (!ExportedValue.IsEmpty())
+             {
+                 Var.DefaultValue = ExportedValue;
+
+                 // Resolve enum display names from exported string
+                 // ExportText may produce "E_AI_State::NewEnumerator0" — strip prefix first
+                 UEnum* EnumPtr = Cast<UEnum>(VarDesc.VarType.PinSubCategoryObject.Get());
+                 if (EnumPtr)
+                 {
+                     FString RawName = Var.DefaultValue;
+                     int32 ColonIdx;
+                     if (RawName.FindLastChar(':', ColonIdx))
+                     {
+                         RawName = RawName.Mid(ColonIdx + 1);
+                     }
+                     int64 EnumValue = EnumPtr->GetValueByNameString(RawName);
+                     if (EnumValue != INDEX_NONE)
+                     {
+                         FText DisplayName = EnumPtr->GetDisplayNameTextByValue(EnumValue);
+                         if (!DisplayName.IsEmpty())
+                         {
+                             Var.DefaultValue = DisplayName.ToString();
+                         }
+                     }
+                 }
+             }
+         }
+     }
+ }
+
+ 注意：GetDefaultObject(false) 参数表示不强制创建 CDO（避免副作用）；若 CDO 已存在则直接使用。
+
+ ---
+ Change 2 — P0 #2：属性标记仅默认组合时省略
+
+ 问题根因：UE 编辑器中新建变量的默认 flag 组合恰好是 EditDefaultsOnly |
+ BlueprintReadWrite，导致所有未定制变量都显示相同标记，增加噪音。
+
+ 文件：BlueprintTextFormatter.cpp，FormatVariables() 方法（第 85-88 行）
+
+ 实现：格式化时，判断 Flags 是否恰好为默认组合（仅包含 EditDefaultsOnly + BlueprintReadWrite），若是则省略 [...] 输出：
+
+ // Omit flags if they are the default-only combination (EditDefaultsOnly + BlueprintReadWrite)
+ static const TArray<FString> DefaultFlagCombination = {
+     TEXT("EditDefaultsOnly"), TEXT("BlueprintReadWrite")
+ };
+ bool bIsDefaultFlagCombo = (Var.Flags.Num() == 2
+     && Var.Flags.Contains(TEXT("EditDefaultsOnly"))
+     && Var.Flags.Contains(TEXT("BlueprintReadWrite")));
+
+ if (Var.Flags.Num() > 0 && !bIsDefaultFlagCombo)
+ {
+     Line += FString::Printf(TEXT("  [%s]"), *FString::Join(Var.Flags, TEXT(", ")));
+ }
+
+ ---
+ Change 3 — P1 #3：过滤 SwitchEnum 内部比较 Pin
+
+ 问题：SwitchEnum 的内部 b 输入 Pin 的 DefaultObject 为 Default__KismetMathLibrary，当前被提取为 DefaultValue =
+ "Default__KismetMathLibrary"，产生噪音输出。
+
+ 文件：BlueprintTextFormatter.cpp，GetMeaningfulPins() 方法（第 394-442 行）
+
+ 实现：在过滤循环中添加规则，跳过 DefaultValue 以 Default__ 开头的 Pin：
+
+ // Skip internal engine pins (e.g. Default__KismetMathLibrary on SwitchEnum)
+ if (Pin.DefaultValue.StartsWith(TEXT("Default__")) && Pin.LinkedTo.Num() == 0)
+ {
+     continue;
+ }
+
+ 位置：放在第一个 continue 之前或之后均可，需在 Meaningful.Add(Pin) 之前。
+
+ ---
+ Change 4 — P1 #4：过滤 LatentActionInfo Pin
+
+ 问题：Delay / AI MoveTo 等节点的 LatentActionInfo Pin 总是显示无意义的默认值 (Linkage=-1,UUID=-1,...)。
+
+ 文件：BlueprintTextFormatter.cpp，GetMeaningfulPins() 方法
+
+ 实现：若 Pin 的 SubType 为 LatentActionInfo 且无连接，跳过该 Pin：
+
+ // Skip LatentActionInfo pins — always present on latent nodes, default value is meaningless
+ if (Pin.SubType == TEXT("LatentActionInfo") && Pin.LinkedTo.Num() == 0)
+ {
+     continue;
+ }
+
+ ---
+ Change 5 — P1 #5：过滤无连接的 delegate Pin
+
+ 问题：CustomEvent 的 Output Delegate Pin（category = "delegate"）在无连接时产生 20 次无用输出。
+
+ 文件：BlueprintTextFormatter.cpp，GetMeaningfulPins() 方法
+
+ 实现：delegate Pin 无连接时跳过：
+
+ // Skip unconnected delegate pins (e.g. CustomEvent Output Delegate)
+ if (Pin.Category == TEXT("delegate") && Pin.LinkedTo.Num() == 0)
+ {
+     continue;
+ }
+
+ ---
+ Change 6 — P1 #6：DefaultValue 和 DefaultObject 的 _C 后缀清理
+
+ 问题：ExtractPin 中从 DefaultObject->GetName() 取到的值（如 AC_HitReaction_C）未做 _C 后缀清理；DefaultValue
+ 字符串中若包含类名也同理。
+
+ 文件：BlueprintGraphExtractor.cpp，ExtractPin() 方法（第 392-417 行）
+
+ 实现：
+ 1. 对 DefaultObject->GetName() 结果统一应用 _C 清理：
+ else if (Pin->DefaultObject != nullptr)
+ {
+     Result.DefaultValue = Pin->DefaultObject->GetName();
+     if (Result.DefaultValue.EndsWith(TEXT("_C")))
+     {
+         Result.DefaultValue.LeftChopInline(2);
+     }
+ }
+
+ 2. 对 Pin->DefaultValue 字符串，仅在 Pin 类型为 "class" 或 "object" 类别时应用清理（避免误改枚举/字符串值）：
+ if (!Pin->DefaultValue.IsEmpty())
+ {
+     Result.DefaultValue = Pin->DefaultValue;
+     // Strip _C suffix for class/object type pins
+     const FName& Cat = Pin->PinType.PinCategory;
+     if ((Cat == TEXT("class") || Cat == TEXT("object"))
+         && Result.DefaultValue.EndsWith(TEXT("_C")))
+     {
+         Result.DefaultValue.LeftChopInline(2);
+     }
+     // ... enum resolution follows
+ }
+
+ ---
+ 关键文件路径
+
+ - C:\UE Project\CodeA\Plugins\BlueprintExporter\Source\BlueprintExporter\Private\BlueprintGraphExtractor.cpp
+ - C:\UE Project\CodeA\Plugins\BlueprintExporter\Source\BlueprintExporter\Private\BlueprintTextFormatter.cpp
+ - C:\UE
+ Project\CodeA\Plugins\BlueprintExporter\Source\BlueprintExporter\Public\BlueprintExporterTypes.h（本次不需修改）
+
+ ---
+ 暂缓（P2）
+
+ - #7 子图节点名冲突：观察 AI 消费时是否出现混淆再决定，当前缩进+分隔符已足够。
+ - #8 Pin 详情中 Reroute 穿透：低优先级，不影响理解。
+
+ ---
+ 验证方法
+
+ 1. 在 Unreal Editor 中对 AC_EnemyAI 蓝图运行导出命令（通过 BlueprintExporter 菜单项或控制台命令）。
+ 2. 检查变量声明区：
+   - 有实际默认值的变量（如 Health）应显示 = 100.0（或 CDO 中存储的值）。
+   - 默认 EditDefaultsOnly + BlueprintReadWrite 组合的标记不显示，其他组合（如
+ BlueprintReadOnly、Replicated）正常显示。
+ 3. 检查 SwitchEnum 节点：不应再出现 Default__KismetMathLibrary 行。
+ 4. 检查 Delay / AI MoveTo 节点：不应再出现 LatentActionInfo Pin 行。
+ 5. 检查 CustomEvent 节点：不应再出现无连接的 Output Delegate 行。
+ 6. 检查 GetComponentByClass 类节点：ComponentClass 默认值不应带 _C 后缀。
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌

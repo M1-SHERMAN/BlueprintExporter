@@ -1,0 +1,132 @@
+ BlueprintExporter 插件实现计划
+
+ Context
+
+ 需要开发一个 UE5 Editor Plugin，将蓝图资产中的所有逻辑（EventGraph、函数、宏）导出为 AI 可读的纯文本格式，替代手动
+ Ctrl+C → Python 清洗的工作流。输出格式须与现有 Python 脚本 ue5_blueprint_cleaner.py 一致。
+
+ 文件结构
+
+ Plugins/BlueprintExporter/
+ ├── BlueprintExporter.uplugin
+ └── Source/BlueprintExporter/
+     ├── BlueprintExporter.Build.cs
+     ├── Public/
+     │   ├── BlueprintExporterModule.h        # 模块入口
+     │   ├── BlueprintExporterTypes.h         # 数据结构 (FExportedPin/Node/Graph/Blueprint)
+     │   ├── BlueprintGraphExtractor.h        # 核心提取逻辑
+     │   └── BlueprintTextFormatter.h         # 文本格式化
+     └── Private/
+         ├── BlueprintExporterModule.cpp      # 模块注册 + 右键菜单 + 保存对话框
+         ├── BlueprintGraphExtractor.cpp      # 遍历 UBlueprint → FExportedBlueprint
+         └── BlueprintTextFormatter.cpp       # FExportedBlueprint → 纯文本
+
+ 注：设计文档中的 BlueprintExporterCommands.cpp 不需要，因为无需 TCommands 类（无工具栏按钮/快捷键），菜单注册直接在
+ Module.cpp 中完成。新增 BlueprintExporterTypes.h 将数据结构独立出来。
+
+ 实现步骤
+
+ Step 1: 插件骨架 (3 files)
+
+ BlueprintExporter.uplugin — Type: Editor, LoadingPhase: Default, CanContainContent: false
+
+ BlueprintExporter.Build.cs:
+ - Public: Core, CoreUObject, Engine
+ - Private: UnrealEd, BlueprintGraph, KismetCompiler, Kismet, GraphEditor, ToolMenus, ContentBrowser, AssetTools,
+ Slate, SlateCore, InputCore, DesktopPlatform
+
+ BlueprintExporterModule.h/.cpp:
+ - StartupModule() → UToolMenus::RegisterStartupCallback → RegisterMenus()
+ - RegisterMenus() → ExtendMenu("ContentBrowser.AssetContextMenu.Blueprint") → 添加 "Export Blueprint Logic" 菜单项
+ - Lambda 中: 通过 Context.FindContext<UContentBrowserAssetContextMenuContext>() 获取选中蓝图 → Extract() → Format() →
+ SaveFileDialog() → FFileHelper::SaveStringToFile()
+ - 默认文件名: {BlueprintName}_exported.txt
+
+ Step 2: 数据结构 (1 file)
+
+ BlueprintExporterTypes.h — 纯 POD 结构体:
+ - FExportedPin: Name, Direction, Category, SubType, ContainerType, DefaultValue, bIsHidden,
+ TArray<TPair<FString,FString>> LinkedTo
+ - FExportedNode: NodeName, NodeClass, GraphName, TMap<FString,FString> Properties, TArray<FExportedPin> Pins
+ - FExportedGraph: GraphName, GraphType, TArray<FExportedNode> Nodes
+ - FExportedBlueprint: BlueprintName, ParentClass, TArray<FExportedGraph> Graphs
+
+ Step 3: 图表提取 (1 file)
+
+ BlueprintGraphExtractor.h/.cpp — class FBlueprintGraphExtractor:
+
+ Extract(UBlueprint*):
+ 1. 基本信息: Blueprint->GetName(), Blueprint->ParentClass->GetName() (去 _C 后缀)
+ 2. 遍历 UbergraphPages (EventGraph), FunctionGraphs, MacroGraphs
+ 3. 每个 Graph → ExtractGraph() → 遍历 Graph->Nodes
+ 4. 跳过 UEdGraphNode_Comment
+
+ ExtractNodeProperties(Node, OutNode) — 关键 Cast 顺序:
+ - UK2Node_CustomEvent 必须在 UK2Node_Event 之前（继承关系）
+ - UK2Node_Event → EventReference.GetMemberName(), bOverrideFunction
+ - UK2Node_CallFunction → FunctionReference.GetMemberName(), IsSelfContext(), GetMemberParentClass() 用于 Class::Func
+ 格式
+ - UK2Node_VariableGet/Set → VariableReference.GetMemberName()
+ - UK2Node_DynamicCast → TargetType->GetName()
+ - UK2Node_MacroInstance → GetMacroGraph()->GetName()
+ - UK2Node_Timeline → TimelineName
+ - UK2Node_SwitchEnum → Enum->GetName()
+ - UK2Node_ComponentBoundEvent → ComponentPropertyName, DelegatePropertyName
+
+ ExtractPin(Pin):
+ - 名称: Pin->GetDisplayName(), fallback PinName
+ - 类型: PinCategory, PinSubCategoryObject->GetName() (去 _C), PinSubCategory (float/double)
+ - 容器: ContainerType → Array/Set/Map
+ - 默认值: DefaultValue 或 DefaultObject->GetName()
+ - 连接: 遍历 Pin->LinkedTo → (TargetNodeName, TargetPinDisplayName)
+
+ Step 4: 文本格式化 (1 file)
+
+ BlueprintTextFormatter.h/.cpp — class FBlueprintTextFormatter:
+
+ Format(Blueprint):
+ === Blueprint: {Name} (Parent: {ParentClass}) ===
+
+ --- Graph: EventGraph ---
+ ... 节点 ...
+ === Execution Flow ===
+ ... 执行流 ...
+ === Data Flow ===
+ ... 数据流 ...
+
+ --- Graph: SetCurrentState (Function) ---
+ ...
+
+ 核心方法:
+ - GetReadableType() — 节点类名 → 可读标记（EVENT, CALL, GET, SET, BRANCH, CAST, MACRO, REROUTE 等），fallback 去
+ K2Node_ 前缀
+ - TopologicalSort() — Kahn 算法按 exec pin 连接排序，Event 节点优先，非连通节点追加末尾
+ - GetMeaningfulPins() — 过滤:
+   - 跳过 hidden self/Target
+   - 跳过无连接 Output_Get
+   - 跳过 Reroute 全部 pin
+   - 跳过无连接的标准 exec pin (execute/then/OutputDelegate)，保留命名 exec (true/false/Is Valid)
+   - 跳过 hidden + 无连接 + 无默认值的 pin
+ - FormatPin() — →/← Name (Type) = default -> Target.Pin，类型优先用 SubType，有容器包裹为 Array<type>
+ - IsTrivialDefault() — 跳过 "0", "0.0", "0.000000", "0, 0, 0", "false", "None"
+ - ResolveRerouteChain() — 递归跟随 Reroute 输出 pin，用 Visited 集防循环
+ - FormatExecutionFlow() — 遍历 exec output pin，解析 reroute，输出 NodeA [label] --> NodeB
+ - FormatDataFlow() — 遍历非 exec 非 hidden output pin（跳过 Output_Get/OutputDelegate），解析 reroute
+
+ Step 5: 编译验证 & 测试
+
+ 1. 在 UE 编辑器中启用插件
+ 2. Content Browser 中右键任意蓝图 → 应出现 "Export Blueprint Logic" 菜单项
+ 3. 点击后弹出保存对话框
+ 4. 导出 AC_EnemyAI 蓝图，对比 blueprint_cleaned_1.txt 验证格式一致性
+ 5. 测试边界: 空蓝图、编译错误蓝图、Widget Blueprint、含宏/函数的蓝图
+
+ 关键注意事项
+
+ - 所有指针解引用须 null 检查（编译错误蓝图、删除的类引用等）
+ - UK2Node_CustomEvent 继承自 UK2Node_Event，Cast 顺序决定正确性
+ - UK2Node_CallArrayFunction 继承自 UK2Node_CallFunction，泛型 Cast 即可覆盖
+ - Pin 的 real 类型通过 PinSubCategory 区分 float/double
+ - UE5.6 中获取选中资产使用 UContentBrowserAssetContextMenuContext，若 API 变动需适配
+ - 文件保存使用 UTF-8 无 BOM (ForceUTF8WithoutBOM)
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌

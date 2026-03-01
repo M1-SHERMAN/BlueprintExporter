@@ -1,0 +1,14 @@
+# Unreal Engine generated directories
+Binaries/
+Intermediate/
+
+# Visual Studio
+.vs/
+*.user
+
+# JetBrains Rider
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
