@@ -2,6 +2,7 @@
 
 > 适用版本：v7（双层增量检测）
 > 引擎：Unreal Engine 5.x（Editor-only Plugin）
+> 作者：Capybara、Claude
 
 ---
 
@@ -9,7 +10,7 @@
 
 1. [功能概述](#1-功能概述)
 2. [使用入口](#2-使用入口)
-3. [Project Settings 配置](#3-project-settings-配置)
+3. [Editor Preference Settings 配置](#3-Editor-Preference-Settings-配置)
 4. [输出目录结构](#4-输出目录结构)
 5. [输出格式规范](#5-输出格式规范)
 6. [增量检测机制](#6-增量检测机制)
@@ -52,7 +53,7 @@ Blueprint Exporter
 **Export Blueprint Logic**
 
 * 弹出系统"另存为"对话框
-* 默认文件名：`{蓝图名}\\\\\\\\\\\\\\\_exported.txt`
+* 默认文件名：`{蓝图名}\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_exported.txt`
 * 默认目录：项目根目录
 * 输出：完整的单文件格式（包含所有图表）
 
@@ -80,7 +81,7 @@ Blueprint Exporter
 **Export Selected Nodes to File...**
 
 * 弹出"另存为"对话框
-* 默认文件名：`{蓝图名}\\\\\\\\\\\\\\\_selection.txt`
+* 默认文件名：`{蓝图名}\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_selection.txt`
 
 选中模式的特殊行为：外部连接（连接到未选中节点的 Pin）在 Pin 连接后加注 `(external)` 标记；执行流/数据流摘要只输出选集内部的连接。
 
@@ -90,7 +91,7 @@ Blueprint Exporter
 
 * 每次 Ctrl+S 保存蓝图时，插件检测到 `PackageSavedWithContextEvent` 事件
 * 若蓝图通过 `ShouldExport()` 过滤，自动导出到缓存目录
-* 保存完成后更新 `\\\\\\\\\\\\\\\_index.txt` 和 `README.md`
+* 保存完成后更新 `\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_index.txt` 和 `README.md`
 
 ---
 
@@ -139,30 +140,30 @@ Blueprint Exporter
 ```
 {ProjectDir}/Saved/BlueprintExports/
 ├── README.md                       ← 所有蓝图的 Markdown 汇总表
-├── \\\\\\\\\\\\\\\_index.txt                      ← 纯文本索引（蓝图名/父类/图表数/变量数）
+├── \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_index.txt                      ← 纯文本索引（蓝图名/父类/图表数/变量数）
 │
-├── AC\\\\\\\\\\\\\\\_EnemyAI/
-│   ├── \\\\\\\\\\\\\\\_summary.txt                ← 蓝图头部 + 变量 + 图表列表（无节点内容）
+├── AC\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EnemyAI/
+│   ├── \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_summary.txt                ← 蓝图头部 + 变量 + 图表列表（无节点内容）
 │   ├── EventGraph.txt              ← EventGraph 完整内容
 │   └── SetCurrentState.txt         ← 函数图 SetCurrentState 的完整内容
 │
-├── BP\\\\\\\\\\\\\\\_EnemyBase/
-│   ├── \\\\\\\\\\\\\\\_summary.txt
+├── BP\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EnemyBase/
+│   ├── \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_summary.txt
 │   └── ...
 │
 └── ...
 ```
 
-**文件名规则**：图表名经 `SanitizeFileName()` 处理——只保留字母、数字、`\\\\\\\\\\\\\\\_`、`-`，其余字符替换为 `\\\\\\\\\\\\\\\_`。
+**文件名规则**：图表名经 `SanitizeFileName()` 处理——只保留字母、数字、`\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_`、`-`，其余字符替换为 `\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_`。
 
 ### \_summary.txt 内容示例
 
 ```
-=== Blueprint: AC\\\\\\\\\\\\\\\_EnemyAI (Parent: ActorComponent) ===
+=== Blueprint: AC\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EnemyAI (Parent: ActorComponent) ===
 
 === Variables ===
-  CurrentState : E\\\\\\\\\\\\\\\_AI\\\\\\\\\\\\\\\_State  = Idle
-  OwnerEnemy   : ACA\\\\\\\\\\\\\\\_EnemyBase
+  CurrentState : E\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_AI\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_State  = Idle
+  OwnerEnemy   : ACA\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EnemyBase
 
 === Graphs ===
   EventGraph       (EventGraph)  14 nodes
@@ -178,8 +179,8 @@ Generated: 2026.03.01-10.30.00
 
 | Blueprint | Parent | Graphs | Variables |
 |-----------|--------|--------|-----------|
-| AC\\\\\\\\\\\\\\\_EnemyAI | ActorComponent | 2 | 3 |
-| BP\\\\\\\\\\\\\\\_EnemyBase | ACA\\\\\\\\\\\\\\\_EnemyBase | 1 | 0 |
+| AC\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EnemyAI | ActorComponent | 2 | 3 |
+| BP\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EnemyBase | ACA\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EnemyBase | 1 | 0 |
 ```
 
 ---
@@ -192,19 +193,19 @@ Generated: 2026.03.01-10.30.00
 === Blueprint: {Name} (Parent: {Parent}) ===
 
 === Variables ===
-  {VarName}  : {Type}  \\\\\\\\\\\\\\\[= {Default}]  \\\\\\\\\\\\\\\[\\\\\\\\\\\\\\\[Flags]]
+  {VarName}  : {Type}  \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[= {Default}]  \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[Flags]]
 
 --- Graph: {GraphName} ---          ← EventGraph 省略类型标注
 --- Graph: {GraphName} ({Type}) --- ← Function/Macro/Interface 带类型
 
-\\\\\\\\\\\\\\\[{NodeName}] {NodeType}
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[{NodeName}] {NodeType}
   {Property}: {Value}
-  → {PinName} ({Type})\\\\\\\\\\\\\\\[= {Default}] \\\\\\\\\\\\\\\[-> {TargetNode}.{TargetPin}]
-  ← {PinName} ({Type})\\\\\\\\\\\\\\\[= {Default}] \\\\\\\\\\\\\\\[-> {TargetNode}.{TargetPin}]
+  → {PinName} ({Type})\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[= {Default}] \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[-> {TargetNode}.{TargetPin}]
+  ← {PinName} ({Type})\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[= {Default}] \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[-> {TargetNode}.{TargetPin}]
 
 === Execution Flow ===
   {SourceNode} --> {TargetNode}
-  {SourceNode} \\\\\\\\\\\\\\\[{PinLabel}] --> {TargetNode}
+  {SourceNode} \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[{PinLabel}] --> {TargetNode}
 
 === Data Flow ===
   {SourceNode}.{SourcePin} --> {TargetNode}.{TargetPin}
@@ -216,7 +217,7 @@ Generated: 2026.03.01-10.30.00
   {Name} : {Type}                       ← 基础类型，无默认值
   {Name} : {Type} = {Default}           ← 有非平凡默认值
   {Name} : Array<{Type}>                ← 容器类型
-  {Name} : {Type} = {Default}  \\\\\\\\\\\\\\\[Flags]  ← 有非默认 Flag 组合
+  {Name} : {Type} = {Default}  \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[Flags]  ← 有非默认 Flag 组合
 ```
 
 **Flag 输出规则**：`EditDefaultsOnly + BlueprintReadWrite` 是默认组合，**不输出**。其余组合如 `EditAnywhere`、`BlueprintReadOnly`、`Replicated` 等用方括号标注。
@@ -227,61 +228,61 @@ Generated: 2026.03.01-10.30.00
 
 |C++ 类名|输出标记|
 |-|-|
-|`K2Node\\\\\\\\\\\\\\\_Event`|`EVENT`|
-|`K2Node\\\\\\\\\\\\\\\_CustomEvent`|`CUSTOM\\\\\\\\\\\\\\\_EVENT`|
-|`K2Node\\\\\\\\\\\\\\\_ComponentBoundEvent`|`COMPONENT\\\\\\\\\\\\\\\_EVENT`|
-|`K2Node\\\\\\\\\\\\\\\_CallFunction`|`CALL`|
-|`K2Node\\\\\\\\\\\\\\\_CallArrayFunction`|`CALL(Array)`|
-|`K2Node\\\\\\\\\\\\\\\_VariableGet`|`GET`|
-|`K2Node\\\\\\\\\\\\\\\_VariableSet`|`SET`|
-|`K2Node\\\\\\\\\\\\\\\_IfThenElse`|`BRANCH`|
-|`K2Node\\\\\\\\\\\\\\\_SwitchEnum`|`SWITCH`|
-|`K2Node\\\\\\\\\\\\\\\_SwitchInteger`|`SWITCH(Int)`|
-|`K2Node\\\\\\\\\\\\\\\_SwitchString`|`SWITCH(String)`|
-|`K2Node\\\\\\\\\\\\\\\_MacroInstance`|`MACRO`|
-|`K2Node\\\\\\\\\\\\\\\_DynamicCast`|`CAST`|
-|`K2Node\\\\\\\\\\\\\\\_Knot`|`REROUTE`（不输出到节点列表，仅用于链路穿透）|
-|`K2Node\\\\\\\\\\\\\\\_FunctionEntry`|`FUNC\\\\\\\\\\\\\\\_ENTRY`|
-|`K2Node\\\\\\\\\\\\\\\_FunctionResult`|`FUNC\\\\\\\\\\\\\\\_RESULT`|
-|`K2Node\\\\\\\\\\\\\\\_MakeArray`|`MAKE\\\\\\\\\\\\\\\_ARRAY`|
-|`K2Node\\\\\\\\\\\\\\\_MakeStruct`|`MAKE\\\\\\\\\\\\\\\_STRUCT`|
-|`K2Node\\\\\\\\\\\\\\\_BreakStruct`|`BREAK\\\\\\\\\\\\\\\_STRUCT`|
-|`K2Node\\\\\\\\\\\\\\\_Select`|`SELECT`|
-|`K2Node\\\\\\\\\\\\\\\_SpawnActorFromClass`|`SPAWN\\\\\\\\\\\\\\\_ACTOR`|
-|`K2Node\\\\\\\\\\\\\\\_Timeline`|`TIMELINE`|
-|`K2Node\\\\\\\\\\\\\\\_Delay`|`DELAY`|
-|`K2Node\\\\\\\\\\\\\\\_ForEachLoop`|`FOR\\\\\\\\\\\\\\\_EACH`|
-|`K2Node\\\\\\\\\\\\\\\_CommutativeAssociativeBinaryOperator`|`OPERATOR`|
-|`K2Node\\\\\\\\\\\\\\\_PromotableOperator`|`OPERATOR`|
-|`K2Node\\\\\\\\\\\\\\\_Composite`|`COLLAPSED`|
-|`K2Node\\\\\\\\\\\\\\\_Tunnel`|`TUNNEL`|
-|其他|去掉 `K2Node\\\\\\\\\\\\\\\_` 前缀|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Event`|`EVENT`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_CustomEvent`|`CUSTOM\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EVENT`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_ComponentBoundEvent`|`COMPONENT\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EVENT`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_CallFunction`|`CALL`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_CallArrayFunction`|`CALL(Array)`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_VariableGet`|`GET`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_VariableSet`|`SET`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_IfThenElse`|`BRANCH`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_SwitchEnum`|`SWITCH`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_SwitchInteger`|`SWITCH(Int)`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_SwitchString`|`SWITCH(String)`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_MacroInstance`|`MACRO`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_DynamicCast`|`CAST`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Knot`|`REROUTE`（不输出到节点列表，仅用于链路穿透）|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_FunctionEntry`|`FUNC\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_ENTRY`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_FunctionResult`|`FUNC\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_RESULT`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_MakeArray`|`MAKE\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_ARRAY`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_MakeStruct`|`MAKE\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_STRUCT`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_BreakStruct`|`BREAK\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_STRUCT`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Select`|`SELECT`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_SpawnActorFromClass`|`SPAWN\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_ACTOR`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Timeline`|`TIMELINE`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Delay`|`DELAY`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_ForEachLoop`|`FOR\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EACH`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_CommutativeAssociativeBinaryOperator`|`OPERATOR`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_PromotableOperator`|`OPERATOR`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Composite`|`COLLAPSED`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Tunnel`|`TUNNEL`|
+|其他|去掉 `K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_` 前缀|
 
 ### 5.4 节点属性输出规则
 
 |节点类型|属性键|内容|
 |-|-|-|
-|`K2Node\\\\\\\\\\\\\\\_Event`|`Event`|事件函数名；覆写时额外一行 `(Override)`|
-|`K2Node\\\\\\\\\\\\\\\_CustomEvent`|`Event`|自定义事件名|
-|`K2Node\\\\\\\\\\\\\\\_ComponentBoundEvent`|`ComponentProperty` / `DelegateProperty`|组件属性名和委托名|
-|`K2Node\\\\\\\\\\\\\\\_CallFunction`|`Function`|函数名；非 Self 上下文时前缀 `ClassName::FuncName`|
-|`K2Node\\\\\\\\\\\\\\\_VariableGet/Set`|`Variable`|变量名|
-|`K2Node\\\\\\\\\\\\\\\_DynamicCast`|`CastTo`|目标类名（去掉 `\\\\\\\\\\\\\\\_C` 后缀）|
-|`K2Node\\\\\\\\\\\\\\\_MacroInstance`|`Macro`|宏图名称|
-|`K2Node\\\\\\\\\\\\\\\_Timeline`|`Timeline`|Timeline 名称|
-|`K2Node\\\\\\\\\\\\\\\_SwitchEnum`|`Enum`|枚举类名|
-|`K2Node\\\\\\\\\\\\\\\_Composite`|`Collapsed`|内嵌子图名称（子图内容以缩进形式展开输出）|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Event`|`Event`|事件函数名；覆写时额外一行 `(Override)`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_CustomEvent`|`Event`|自定义事件名|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_ComponentBoundEvent`|`ComponentProperty` / `DelegateProperty`|组件属性名和委托名|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_CallFunction`|`Function`|函数名；非 Self 上下文时前缀 `ClassName::FuncName`|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_VariableGet/Set`|`Variable`|变量名|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_DynamicCast`|`CastTo`|目标类名（去掉 `\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_C` 后缀）|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_MacroInstance`|`Macro`|宏图名称|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Timeline`|`Timeline`|Timeline 名称|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_SwitchEnum`|`Enum`|枚举类名|
+|`K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Composite`|`Collapsed`|内嵌子图名称（子图内容以缩进形式展开输出）|
 
 ### 5.5 Pin 过滤规则
 
 以下 Pin 不输出：
 
 1. `bIsHidden == true` 且名称为 `Target` 或 `self`
-2. 名称为 `Output\\\\\\\\\\\\\\\_Get` 且无连接
-3. 所属节点为 `K2Node\\\\\\\\\\\\\\\_Knot`（Reroute 节点的所有 Pin）
+2. 名称为 `Output\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Get` 且无连接
+3. 所属节点为 `K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Knot`（Reroute 节点的所有 Pin）
 4. `exec` 类型的 **Input** Pin（连接关系已由 Output 端描述）
 5. 无连接的 `exec` Output Pin，且名称为 `execute`、`then`、`OutputDelegate` 之一
-6. `DefaultValue` 以 `Default\\\\\\\\\\\\\\\_\\\\\\\\\\\\\\\_` 开头且无连接（引擎内部 Pin）
+6. `DefaultValue` 以 `Default\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_` 开头且无连接（引擎内部 Pin）
 7. `SubType == LatentActionInfo` 且无连接
 8. `category == delegate` 且无连接
 9. `bIsHidden == true` 且无连接且无默认值
@@ -293,7 +294,7 @@ Generated: 2026.03.01-10.30.00
 
 ```
   {SourceNode} --> {TargetNode}            ← 走 "then" 或 "OutputPin"
-  {SourceNode} \\\\\\\\\\\\\\\[TrueBranch] --> {TargetNode}  ← 其他 exec 输出 Pin 带标签
+  {SourceNode} \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\[TrueBranch] --> {TargetNode}  ← 其他 exec 输出 Pin 带标签
 ```
 
 **Data Flow** 格式：
@@ -302,7 +303,7 @@ Generated: 2026.03.01-10.30.00
   {SourceNode}.{SourcePin} --> {TargetNode}.{TargetPin}
 ```
 
-两者都会自动穿透 `K2Node\\\\\\\\\\\\\\\_Knot`（Reroute）链，显示最终目标节点。
+两者都会自动穿透 `K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Knot`（Reroute）链，显示最终目标节点。
 
 ### 5.7 节点排序
 
@@ -321,8 +322,8 @@ Generated: 2026.03.01-10.30.00
 ### 第一层：时间戳比对（快速路径）
 
 ```
-if \\\\\\\\\\\\\\\_summary.txt 存在:
-    ExportTimestamp = \\\\\\\\\\\\\\\_summary.txt 的修改时间
+if \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_summary.txt 存在:
+    ExportTimestamp = \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_summary.txt 的修改时间
     UassetTimestamp = .uasset 文件的磁盘修改时间
     if ExportTimestamp >= UassetTimestamp:
         → 跳过，无需加载蓝图资产
@@ -344,14 +345,14 @@ bool WriteFileIfChanged(FilePath, NewContent):
     return true
 ```
 
-**关键语义**：`\\\\\\\\\\\\\\\_summary.txt` 只有在内容实际变化时才写入。这保持了其时间戳的语义准确性，使第一层时间戳检测在下次全量导出时仍然有效。
+**关键语义**：`\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_summary.txt` 只有在内容实际变化时才写入。这保持了其时间戳的语义准确性，使第一层时间戳检测在下次全量导出时仍然有效。
 
 ### 日志示例
 
 ```
 LogBlueprintExporter: ExportAll complete: 3 exported, 47 skipped (unchanged), 5 filtered out, 55 total assets
-LogBlueprintExporter: Exported AC\\\\\\\\\\\\\\\_EnemyAI: 3 file(s) updated
-LogBlueprintExporter: Verbose: Exported BP\\\\\\\\\\\\\\\_SomeActor: no changes detected, all files up-to-date
+LogBlueprintExporter: Exported AC\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EnemyAI: 3 file(s) updated
+LogBlueprintExporter: Verbose: Exported BP\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_SomeActor: no changes detected, all files up-to-date
 ```
 
 ### 过期目录清理
@@ -391,7 +392,7 @@ UBlueprint (UE 内存)
 FExportedBlueprint (中间 POD 结构)
     │
     ├─▶ FBlueprintTextFormatter::Format()          → 完整单文件文本
-    ├─▶ FBlueprintTextFormatter::FormatSummary()   → \\\\\\\\\\\\\\\_summary.txt 内容
+    ├─▶ FBlueprintTextFormatter::FormatSummary()   → \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_summary.txt 内容
     ├─▶ FBlueprintTextFormatter::FormatGraphOnly() → {GraphName}.txt 内容
     └─▶ FBlueprintTextFormatter::FormatSelectedNodes() → 选中节点文本
 ```
@@ -413,7 +414,7 @@ PrivateDependencyModuleNames:
 * **Content Browser 菜单**：`UToolMenus::ExtendMenu("ContentBrowser.AssetContextMenu.Blueprint")`
 * **蓝图编辑器节点右键菜单**：`FGraphEditorModule::GetAllGraphEditorContextMenuExtender()` 数组注册，在 `"EdGraphSchemaNodeActions"` 之后插入扩展段
 
-> 注意：节点右键菜单\\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\*不能\\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\*用 `UToolMenus` 动态段注册——这是 v5 踩过的坑。正确方式是向 `FGraphEditorModule` 的 Extender 数组注册 `FGraphEditorMenuExtender\\\\\\\\\\\\\\\_SelectedNode` Lambda。
+> 注意：节点右键菜单\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\*不能\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\*\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\*用 `UToolMenus` 动态段注册——这是 v5 踩过的坑。正确方式是向 `FGraphEditorModule` 的 Extender 数组注册 `FGraphEditorMenuExtender\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_SelectedNode` Lambda。
 
 * **自动加载**：通过 `FModuleManager::OnModulesChanged()` 委托监听 `GraphEditor` 模块加载，确保 GraphEditor 晚于 BlueprintExporter 加载时也能正确注册。
 
@@ -439,7 +440,7 @@ struct FExportedPin
     FString Name;           // 显示名（优先 GetDisplayName()，否则 PinName）
     FString Direction;      // "Input" | "Output"
     FString Category;       // exec | bool | int | real | object | struct | byte | ...
-    FString SubType;        // 具体子类型：Character, Vector, E\\\\\\\\\\\\\\\_AI\\\\\\\\\\\\\\\_State, float, double
+    FString SubType;        // 具体子类型：Character, Vector, E\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_AI\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_State, float, double
     FString ContainerType;  // "Array" | "Set" | "Map" | ""
     FString DefaultValue;
     bool bIsHidden = false;
@@ -457,8 +458,8 @@ struct FExportedVariable
 
 struct FExportedNode
 {
-    FString NodeName;       // 对象名，如 "K2Node\\\\\\\\\\\\\\\_Event\\\\\\\\\\\\\\\_0"
-    FString NodeClass;      // 类名，如 "K2Node\\\\\\\\\\\\\\\_Event"
+    FString NodeName;       // 对象名，如 "K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Event\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_0"
+    FString NodeClass;      // 类名，如 "K2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Event"
     FString GraphName;
     TArray<TPair<FString, FString>> Properties;  // 有序键值对（保留插入顺序）
     TArray<FExportedPin> Pins;
@@ -476,7 +477,7 @@ struct FExportedGraph
 struct FExportedBlueprint
 {
     FString BlueprintName;
-    FString ParentClass;    // 去掉 \\\\\\\\\\\\\\\_C 后缀
+    FString ParentClass;    // 去掉 \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_C 后缀
     TArray<FExportedVariable> Variables;
     TArray<FExportedGraph> Graphs;
 };
@@ -488,11 +489,11 @@ struct FExportedBlueprint
 
 ### 9.1 \_C 后缀处理
 
-蓝图生成的类名（`UBlueprintGeneratedClass`）以 `\\\\\\\\\\\\\\\_C` 结尾（如 `AC\\\\\\\\\\\\\\\_EnemyAI\\\\\\\\\\\\\\\_C`）。提取器在以下位置统一去掉该后缀：
+蓝图生成的类名（`UBlueprintGeneratedClass`）以 `\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_C` 结尾（如 `AC\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_EnemyAI\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_C`）。提取器在以下位置统一去掉该后缀：
 
 * 蓝图 `ParentClass` 名称
 * Pin 的 `SubType`（`PinSubCategoryObject`）
-* 动态转型目标类名（`UK2Node\\\\\\\\\\\\\\\_DynamicCast::TargetType`）
+* 动态转型目标类名（`UK2Node\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_DynamicCast::TargetType`）
 * Pin 的 `DefaultValue`（class/object 类型）
 * `DefaultObject` 名称
 
@@ -500,11 +501,11 @@ struct FExportedBlueprint
 
 枚举变量默认值和枚举 Pin 默认值会经过 `UEnum::GetDisplayNameTextByValue()` 转换为人类可读的显示名（如 `NewEnumerator0` → `Idle`）。如果转换失败则保留原始枚举项名。
 
-CDO 导出的枚举字符串（格式 `E\\\\\\\\\\\\\\\_AI\\\\\\\\\\\\\\\_State::NewEnumerator0`）在读取 CDO 属性时额外做了双冒号后半段提取再转换。
+CDO 导出的枚举字符串（格式 `E\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_AI\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_State::NewEnumerator0`）在读取 CDO 属性时额外做了双冒号后半段提取再转换。
 
 ### 9.3 Comment 节点
 
-`UEdGraphNode\\\\\\\\\\\\\\\_Comment` 节点在提取阶段直接跳过，不参与输出。
+`UEdGraphNode\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\_Comment` 节点在提取阶段直接跳过，不参与输出。
 
 ### 9.4 Reroute 节点（K2Node\_Knot）
 
