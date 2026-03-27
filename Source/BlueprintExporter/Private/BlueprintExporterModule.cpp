@@ -212,6 +212,15 @@ void FBlueprintExporterModule::ExportSelectedBlueprints(const TArray<FAssetData>
 {
 	for (const FAssetData& AssetData : SelectedAssets)
 	{
+		const FString AssetClassPath = AssetData.AssetClassPath.ToString();
+		if (AssetClassPath.Contains(TEXT("EditorUtility")))
+		{
+			UE_LOG(LogBlueprintExporter, Verbose,
+				TEXT("Skipping editor utility asset before load: %s (%s)"),
+				*AssetData.AssetName.ToString(), *AssetClassPath);
+			continue;
+		}
+
 		UBlueprint* Blueprint = Cast<UBlueprint>(AssetData.GetAsset());
 		if (!Blueprint)
 		{
@@ -408,6 +417,21 @@ bool FBlueprintExporterModule::ShouldExport(UBlueprint* Blueprint,
 	if (!Blueprint || !Settings)
 	{
 		return false;
+	}
+
+	// Editor utility blueprints can trigger editor-only widget compilation paths
+	// during bulk export and are not useful for gameplay blueprint cache output.
+	const UClass* BlueprintClass = Blueprint->GetClass();
+	if (BlueprintClass)
+	{
+		const FString BlueprintClassName = BlueprintClass->GetName();
+		if (BlueprintClassName.Contains(TEXT("EditorUtility")))
+		{
+			UE_LOG(LogBlueprintExporter, Verbose,
+				TEXT("Skipping editor utility blueprint: %s (%s)"),
+				*Blueprint->GetName(), *BlueprintClassName);
+			return false;
+		}
 	}
 
 	// Blueprint type filter
@@ -608,6 +632,13 @@ void FBlueprintExporterModule::ExportAllBlueprints()
 	{
 		const FString BPName       = AssetData.AssetName.ToString();
 		const FString SanitizedName = SanitizeFileName(BPName);
+		const FString AssetClassPath = AssetData.AssetClassPath.ToString();
+
+		if (AssetClassPath.Contains(TEXT("EditorUtility")))
+		{
+			FilteredCount++;
+			continue;
+		}
 
 		// ── 第一层：时间戳比对，跳过未修改的蓝图 ──
 		const FString SummaryPath      = ExportDir / SanitizedName / TEXT("_summary.txt");
