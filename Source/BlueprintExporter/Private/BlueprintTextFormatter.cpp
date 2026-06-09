@@ -151,7 +151,7 @@ FString FBlueprintTextFormatter::FormatNode(const FExportedNode& Node)
 	static const TSet<FString> ConsumedKeys = {
 		TEXT("Event"), TEXT("Function"), TEXT("Variable"), TEXT("CastTo"),
 		TEXT("Macro"), TEXT("Timeline"), TEXT("Enum"), TEXT("Collapsed"),
-		TEXT("ComponentProperty"), TEXT("DelegateProperty"),
+		TEXT("ComponentProperty"), TEXT("DelegateProperty"), TEXT("Operator"),
 	};
 
 	bool bHasOverride = false;
@@ -432,6 +432,11 @@ FString FBlueprintTextFormatter::GetSemanticTitle(const FExportedNode& Node) con
 			return FString::Printf(TEXT("On %s.%s"), *PrimaryValue, *DelegateName);
 		}
 		return PrimaryValue;
+	}
+	if (NodeClass == TEXT("K2Node_CommutativeAssociativeBinaryOperator")
+		|| NodeClass == TEXT("K2Node_PromotableOperator"))
+	{
+		return FString::Printf(TEXT("Op: %s"), *PrimaryValue);
 	}
 	if (NodeClass == TEXT("K2Node_IfThenElse"))
 	{
