@@ -17,6 +17,65 @@
 #include "K2Node_SwitchEnum.h"
 #include "K2Node_ComponentBoundEvent.h"
 #include "K2Node_Composite.h"
+#include "K2Node_CommutativeAssociativeBinaryOperator.h"
+#include "K2Node_PromotableOperator.h"
+
+namespace
+{
+	// Map a Kismet operator function name (e.g. "Add_IntInt", "GreaterEqual_DoubleDouble",
+	// "BooleanAND") to a human-readable operator symbol. Falls back to the raw name when unknown.
+	FString GetOperatorSymbol(const FString& FunctionName)
+	{
+		// Whole-name matches first (boolean ops have no "_Type" suffix)
+		static const TMap<FString, FString> WholeNameMap = {
+			{ TEXT("BooleanAND"), TEXT("AND") },
+			{ TEXT("BooleanOR"), TEXT("OR") },
+			{ TEXT("BooleanXOR"), TEXT("XOR") },
+			{ TEXT("BooleanNAND"), TEXT("NAND") },
+			{ TEXT("BooleanNOR"), TEXT("NOR") },
+			{ TEXT("Not_PreBool"), TEXT("NOT") },
+		};
+		if (const FString* Whole = WholeNameMap.Find(FunctionName))
+		{
+			return *Whole;
+		}
+
+		// Prefix (token before first underscore) matches for typed operators
+		FString Prefix = FunctionName;
+		int32 UnderscoreIdx;
+		if (FunctionName.FindChar(TEXT('_'), UnderscoreIdx))
+		{
+			Prefix = FunctionName.Left(UnderscoreIdx);
+		}
+
+		static const TMap<FString, FString> PrefixMap = {
+			{ TEXT("Add"), TEXT("+") },
+			{ TEXT("Concat"), TEXT("+") },
+			{ TEXT("Subtract"), TEXT("-") },
+			{ TEXT("Multiply"), TEXT("*") },
+			{ TEXT("Divide"), TEXT("/") },
+			{ TEXT("Percent"), TEXT("%") },
+			{ TEXT("GreaterEqual"), TEXT(">=") },
+			{ TEXT("Greater"), TEXT(">") },
+			{ TEXT("LessEqual"), TEXT("<=") },
+			{ TEXT("Less"), TEXT("<") },
+			{ TEXT("EqualEqual"), TEXT("==") },
+			{ TEXT("NotEqual"), TEXT("!=") },
+			{ TEXT("And"), TEXT("&") },
+			{ TEXT("Or"), TEXT("|") },
+			{ TEXT("Xor"), TEXT("^") },
+			{ TEXT("Min"), TEXT("min") },
+			{ TEXT("Max"), TEXT("max") },
+		};
+		if (const FString* Sym = PrefixMap.Find(Prefix))
+		{
+			return *Sym;
+		}
+
+		// Unknown operator — keep the raw function name so no information is lost
+		return FunctionName;
+	}
+}
 
 FExportedBlueprint FBlueprintGraphExtractor::Extract(UBlueprint* Blueprint)
 {
@@ -283,6 +342,17 @@ void FBlueprintGraphExtractor::ExtractNodeProperties(UEdGraphNode* Node, FExport
 		{
 			OutNode.Properties.Emplace(TEXT("Override"), TEXT("true"));
 		}
+		return;
+	}
+
+	// Operator nodes (inherit UK2Node_CallFunction — must be checked before it).
+	// Export the actual operation as a symbol (e.g. "+", ">=", "AND").
+	if (Node->IsA<UK2Node_CommutativeAssociativeBinaryOperator>()
+		|| Node->IsA<UK2Node_PromotableOperator>())
+	{
+		UK2Node_CallFunction* OpNode = CastChecked<UK2Node_CallFunction>(Node);
+		FString FuncName = OpNode->FunctionReference.GetMemberName().ToString();
+		OutNode.Properties.Emplace(TEXT("Operator"), GetOperatorSymbol(FuncName));
 		return;
 	}
 
