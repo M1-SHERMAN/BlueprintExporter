@@ -292,6 +292,8 @@ v8 使用 `GetSemanticTitle()` 生成人类可读的节点标题：
 |`K2Node_Timeline`|Timeline|`Timeline: {名称}`|
 |`K2Node_Composite`|Collapsed|`Collapsed: {子图名}`|
 |`K2Node_ComponentBoundEvent`|ComponentProperty + DelegateProperty|`On {组件}.{委托名}`|
+|`K2Node_CommutativeAssociativeBinaryOperator`|Operator|`Op: {运算符}`（如 `Op: +`）|
+|`K2Node_PromotableOperator`|Operator|`Op: {运算符}`（如 `Op: >=`）|
 
 ### 5.4 节点短 ID 映射（GetShortNodeId）
 
@@ -364,6 +366,8 @@ v8 使用 `GetSemanticTitle()` 生成人类可读的节点标题：
 |`K2Node_Timeline`|`Timeline`|Timeline 名称|
 |`K2Node_SwitchEnum`|`Enum`|枚举类名|
 |`K2Node_Composite`|`Collapsed`|内嵌子图名称（子图内容以缩进形式展开输出）|
+|`K2Node_CommutativeAssociativeBinaryOperator`|`Operator`|运算符符号（由 Kismet 函数名映射，如 `Add_IntInt` → `+`）|
+|`K2Node_PromotableOperator`|`Operator`|运算符符号（如 `GreaterEqual_DoubleDouble` → `>=`）|
 
 ### 5.7 Pin 过滤规则
 
@@ -402,6 +406,50 @@ v8 使用 `GetSemanticTitle()` 生成人类可读的节点标题：
 * 入度为 0 的节点（事件节点）优先
 * 同层节点中，包含 `Event` 的节点在前，其余按节点名字母序
 * 无法进入拓扑序的节点（无 exec 连接，如纯数据节点）追加到末尾
+
+### 5.10 运算符符号映射（GetOperatorSymbol）
+
+运算符节点（`K2Node_CommutativeAssociativeBinaryOperator`、`K2Node_PromotableOperator`）继承自 `UK2Node_CallFunction`，提取器在 CallFunction 之前优先识别它们，并将底层 Kismet 函数名映射为可读运算符符号，写入 `Operator` 属性。语义化标题输出为 `Op: {符号}`。
+
+**整名映射**（布尔运算，无类型后缀）：
+
+|函数名|符号|
+|-|-|
+|`BooleanAND`|`AND`|
+|`BooleanOR`|`OR`|
+|`BooleanXOR`|`XOR`|
+|`BooleanNAND`|`NAND`|
+|`BooleanNOR`|`NOR`|
+|`Not_PreBool`|`NOT`|
+
+**前缀映射**（取首个下划线前的前缀，匹配带类型后缀的运算函数，如 `Add_IntInt`、`GreaterEqual_DoubleDouble`）：
+
+|前缀|符号|
+|-|-|
+|`Add` / `Concat`|`+`|
+|`Subtract`|`-`|
+|`Multiply`|`*`|
+|`Divide`|`/`|
+|`Percent`|`%`|
+|`Greater`|`>`|
+|`GreaterEqual`|`>=`|
+|`Less`|`<`|
+|`LessEqual`|`<=`|
+|`EqualEqual`|`==`|
+|`NotEqual`|`!=`|
+|`And` / `Or` / `Xor`|`&` / `\|` / `^`（位运算）|
+|`Min` / `Max`|`min` / `max`|
+
+> 未命中映射表的运算函数保留原始函数名，确保信息不丢失。
+
+输出示例：
+
+```
+[Op: +] (Op_4)
+  ← A -> VarGet_3.Row
+  ← B -> VarGet_4.Bay
+  → Return Value -> CallFunc_28.Key
+```
 
 ---
 
